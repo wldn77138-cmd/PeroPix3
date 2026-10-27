@@ -65,16 +65,16 @@ export function SceneLane() {
   const laneSize = useUi((u) => u.laneSize);
   /** 씬을 아래에 두나 오른쪽에 두나 — 무대를 그리는 것은 `Canvas`, 켜고 끄는 것은 여기다 */
   const laneSide = useUi((u) => u.laneSide);
-  /** ★★**세로 모드에서는 줄이 통째로 90° 돈다** (사용자 지시 2026-08-22).
+  /** 씬 칸이 **오른쪽에 놓였나** — 놓는 자리만 뜻한다. 줄을 돌릴지는 아래 `vert` 가 정한다. */
+  const onRight = laneSide === "right";
+  /** ★★**줄을 90° 돌릴 것인가** — 지금은 **늘 돌리지 않는다** (사용자 결정 2026-10-27).
    *
-   *    아래에 있을 때   씬은 세로로 쌓이고, 한 씬의 장들이 **가로로** 흐른다
-   *    오른쪽에 있을 때 씬은 **세로 기둥**이 되어 **오른쪽으로** 늘어서고, 장들이 아래로 쌓인다
-   *
-   *  ★세로용 컴포넌트를 따로 만들지 않는다 — 같은 것에 **축만 넘긴다**(`vert`). 두 벌이면
-   *    고칠 때마다 맞춰야 하고, 한쪽만 고쳐진 채로 남는다.
-   *  ★머리 크기는 **모드마다 따로 기억한다** (`laneHeadW` 폭 · `laneHeadH` 높이) — 한 값을
-   *    나눠 쓰면 한쪽에서 끈 것이 다른 쪽을 엉뚱하게 두껍게 만든다. */
-  const vert = laneSide === "right";
+   *    예전에는 오른쪽에 놓으면 씬이 썸네일 한 장 폭의 **세로 기둥**이 되었는데, 그 폭에
+   *    프롬프트가 갇혀 한두 글자마다 줄이 꺾였고, 펼치면 아래로만 늘어나 고칠 수가 없었다.
+   *    이제 오른쪽에 놓아도 **아래 모드와 같은 모양**(왼쪽 머리 · 오른쪽 장들)으로 그린다.
+   *  ★돌린 모양의 갈래(`vert ? … : …`)는 지우지 않고 남겨 두었다 — 여기 한 줄이 켜고 끈다.
+   *    걷어낼 때는 `laneHeadH`(`store/ui`)와 `useReorder` 의 세로 축도 함께 본다. */
+  const vert: boolean = false;
   /** 씬 머리의 **그 축 크기** — 아래 모드면 폭, 세로 모드면 높이 */
   const headw = useUi((u) => (vert ? u.laneHeadH : u.laneHeadW));
   /** 전역 키 임자는 한 번만 매다므로(`window`) 축은 ref 로 읽는다 */
@@ -744,8 +744,8 @@ export function SceneLane() {
         <button
           data-lane-side={laneSide}
           className="lane-side-btn"
-          onClick={() => useUi.getState().setLaneSide(vert ? "bottom" : "right")}
-          data-tip={t(vert ? "canvas.laneToBottom" : "canvas.laneToRight")}
+          onClick={() => useUi.getState().setLaneSide(onRight ? "bottom" : "right")}
+          data-tip={t(onRight ? "canvas.laneToBottom" : "canvas.laneToRight")}
           style={{
             display: "inline-flex",
             alignItems: "center",
@@ -758,7 +758,7 @@ export function SceneLane() {
             background: "var(--panel)",
           }}
         >
-          <Ratio {...(vert ? RATIO_PORTRAIT : RATIO_LANDSCAPE)} max={13} />
+          <Ratio {...(onRight ? RATIO_PORTRAIT : RATIO_LANDSCAPE)} max={13} />
         </button>
         <b style={{ fontSize: "var(--text-2xs)", color: "var(--ink-dim)" }}>{t("scenes.title")}</b>
         {/* ★씬 프롬프트가 payload 의 **어디로 들어가나** — 왼쪽 컨테이너 이름(베이스 프롬프트 /

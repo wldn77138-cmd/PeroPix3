@@ -1,0 +1,64 @@
+# 원본 릴리즈를 따라간다 — **이 포크에만 있는 파일**이다.
+#
+# 원본(mrm987/PeroPix3)에 새 릴리즈가 나오면 그 태그를 master 에 합치고,
+# `v<원본 버전>-custom` 태그를 밀어 `Release` 워크플로(release.yml)가 내 판을 짓게 한다.
+# 다 지어지면 `publish-custom.yml` 이 초안을 공개하고, 앱은 그것을 업데이트로 받는다
+# (`backend/update.py` 의 `REPO` 가 이 포크를 본다).
+#
+# ★태그를 원본 것과 **다른 이름**으로 단다. 원본 태그(`v3.8.0`)는 원본 커밋을 가리키므로
+#   내 합친 커밋에 같은 이름을 쓸 수 없다. 꼬리 `-custom` 은 앱의 버전 비교에서 떨어져 나가고
+#   (`update.parse_version`), `dev` 가 아니라서 업데이트 확인도 그대로 돈다.
+# ★원본 태그는 이 포크로 **밀지 않는다** — 밀면 release.yml 이 수정 없는 원본 판을 한 번 더 짓는다.
+# ★★`SYNC_TOKEN` 이 있어야 한다 (저장소 Settings ▸ Secrets ▸ Actions). 기본 `GITHUB_TOKEN` 으로는
+#   ① 원본이 `.github/workflows` 를 고친 판을 합쳐 밀 수 없고 ② 민 태그가 다른 워크플로를 깨우지 않는다.
+#   권한: 이 저장소 하나 · Contents 읽기/쓰기 · Workflows 읽기/쓰기.
+# ★합치다 부딪히면(원본이 내 수정과 같은 줄을 고쳤으면) 여기서 실패하고 메일이 간다.
+#   그때는 손으로 합친 뒤 이 워크플로를 다시 돌린다. 앱은 이전 판에 그대로 머문다.
+name: Sync upstream (custom)
+
+on:
+  schedule:
+    # 6시간마다 (UTC 기준 17분 — 정각은 GitHub 가 붐벼 밀린다)
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - name: 원본 최신 릴리즈를 합치고 내 태그를 민다
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          UP=$(gh api repos/mrm987/PeroPix3/releases/latest --jq .tag_name)
+          MINE="${UP}-custom"
+          echo "원본 최신: $UP → 내 태그: $MINE"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$MINE" >/dev/null; then
+            echo "이미 지었다 — 할 일 없음"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/mrm987/PeroPix3.git
+          # ★태그 하나만 받는다 — 원본 태그 전부를 받으면 아래 push 에 딸려 갈 수 있다
+          git fetch --no-tags upstream "refs/tags/$UP:refs/upstream-tags/$UP"
+          git merge --no-edit -m "원본 $UP 합침" "refs/upstream-tags/$UP"
+
+          git push origin HEAD:master
+          git tag "$MINE"
+          git push origin "refs/tags/$MINE"

@@ -1,0 +1,35 @@
+# 내 판을 공개한다 — **이 포크에만 있는 파일**이다.
+#
+# release.yml 은 릴리즈를 **초안**으로 만든다 (원본 개발자가 본문을 손으로 적고 공개하는 흐름).
+# 초안은 `releases/latest` 에 안 잡혀서 앱이 업데이트를 못 본다. 그래서 `-custom` 태그의
+# 빌드가 끝나면 여기서 공개한다.
+# ★윈도우 전체 zip 이 올라갔을 때만 공개한다 — 맥 잡이 실패해도 윈도우 판은 쓸 수 있다.
+#   zip 이 없으면 공개하지 않는다 (앱이 「빌드 중」으로 보고 받지 않는다).
+name: Publish custom release
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: endsWith(github.event.workflow_run.head_branch, '-custom')
+    runs-on: ubuntu-latest
+    steps:
+      - name: 초안 공개
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          VER="${TAG#v}"
+          if ! gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -qx "PeroPix-$VER-win64.zip"; then
+            echo "PeroPix-$VER-win64.zip 이 없다 — 공개하지 않는다"
+            exit 1
+          fi
+          gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --draft=false --latest \
+            --notes "원본 ${TAG%-custom} 에 내 수정을 얹어 지은 판."

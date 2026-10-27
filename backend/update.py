@@ -34,7 +34,9 @@ import httpx
 
 #: 릴리즈를 보는 곳. ★저장소 이름을 코드에 박는다 — 설정으로 빼면 남의 저장소를 가리켜
 #  임의의 zip 을 앱 폴더에 풀 수 있게 된다.
-REPO = "mrm987/PeroPix3"
+#  ★이 사본은 **포크의 릴리즈**를 본다 — 원본 릴리즈에 내 수정을 얹어 다시 지은 판이 거기 올라간다
+#    (`.github/workflows/sync-upstream.yml`). 원본 주소로 되돌리면 공식 판으로 갈아타진다.
+REPO = "wldn77138-cmd/PeroPix3"
 API = f"https://api.github.com/repos/{REPO}/releases/latest"
 UA = {"Accept": "application/vnd.github+json", "User-Agent": "PeroPix3-App"}
 
