@@ -17,7 +17,8 @@ permissions:
 
 jobs:
   publish:
-    if: endsWith(github.event.workflow_run.head_branch, '-custom')
+    # `v3.8.0-custom`(원본을 따라 지은 판)과 `v3.8.0-custom.1`(그 위에 내 수정을 더 얹은 판) 둘 다
+    if: contains(github.event.workflow_run.head_branch, '-custom')
     runs-on: ubuntu-latest
     steps:
       - name: 초안 공개
@@ -32,4 +33,4 @@ jobs:
             exit 1
           fi
           gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --draft=false --latest \
-            --notes "원본 ${TAG%-custom} 에 내 수정을 얹어 지은 판."
+            --notes "원본 ${TAG%%-custom*} 에 내 수정을 얹어 지은 판."

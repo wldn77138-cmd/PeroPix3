@@ -31,6 +31,7 @@ import { clearUndo, undoLast } from "../lib/undo";
 import { t as tr } from "../i18n";
 import { toast } from "../store/toast";
 import { useRename } from "../components/useRename";
+import { pickLatest, SceneThumb } from "../custom/sceneExtras";
 import { ask } from "../store/ask";
 import { usePreviews, withPreviews, isPreviewFile } from "../store/previews";
 import { BANNER_BG, bannerEmptyFill } from "../cards/banner";
@@ -803,6 +804,23 @@ export function SceneLane() {
             ★가르는 것(모드·이름·목적지)과 **거르는 것**을 양 끝으로 떼어 놓는 셈이기도 하다.
             ★`writing-mode` 안에서는 flex 축도 함께 도므로 이 한 줄이 두 모드를 다 맡는다. */}
         <span style={{ flex: 1 }} />
+        {/* 내 판: 켜진 씬 카드의 씬마다 최신 장 하나씩 고르기 (`src/custom/sceneExtras.tsx`) */}
+        <button
+          data-pick-latest
+          onClick={() => pickLatest(tab.cards, takesOfCell)}
+          data-tip="켜진 씬 카드의 씬마다 가장 최근 그림을 고릅니다"
+          style={{
+            height: 22,
+            padding: "0 var(--sp-3)",
+            borderRadius: "var(--r-1)",
+            border: "1px solid var(--line)",
+            color: "var(--ink-soft)",
+            fontSize: "var(--text-2xs)",
+            whiteSpace: "nowrap",
+          }}
+        >
+          최신 고르기
+        </button>
         {/* ★★**별표만 보기** (2026-08-22 에 걷었다가 사용자 지시로 되살렸다 2026-08-25).
             뽑은 장이 수십이 되면 마음에 든 것을 다시 찾는 데 시간이 든다 — 별을 달아 두고
             그것만 본다.
@@ -1912,8 +1930,18 @@ function SceneRow(
           }}
           /* ★`display: contents` 였다 — 상자가 없으니 **빈 자리가 아예 없었다.**
              자리를 차지해야 그 자리를 누를 수 있다 (`flex: 1` 로 머리의 남은 만큼). */
-          style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
+          style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "row", gap: 6 }}
         >
+          {/* 내 판: 이 씬이 무엇을 뽑는지 보여 주는 그림 — 머리 아무 데나 끌어다 놓으면 걸린다 */}
+          <SceneThumb
+            groupId={p.groupId}
+            cardId={p.card.id}
+            cell={c}
+            h={Math.max(36, p.h - 30)}
+            w={Math.round((Math.max(36, p.h - 30) * p.w) / p.h)}
+            onClear={() => patchCell({ thumb: undefined })}
+          />
+          <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }}>
           <BlockList
             /* ★★블록을 고치는 자리는 앱에 **이것 하나**다 (사용자 지적 2026-08-20:
                *"동일한 컴포넌트를 쓰는게 아니고 복제해서 만드니까 불일치가 계속 생김"*).
@@ -1942,6 +1970,7 @@ function SceneRow(
             onNext={() => p.onStepField(c.id, 1, "text")}
             onTab={(dir) => p.onStepField(c.id, dir, "text")}
           />
+          </div>
         </div>
       </div>
 

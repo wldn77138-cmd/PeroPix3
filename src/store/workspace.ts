@@ -74,6 +74,8 @@ export type Slot = {
   /** 접어 두면 머리만 남는다 (블록과 같은 규칙) */
   open?: boolean;
   locked?: boolean;
+  /** 내 판: 이 씬이 무엇을 뽑는지 보여 주는 그림 (`src/custom/sceneExtras.tsx`). 바이트는 `/api/pin/<tid>` */
+  thumb?: { tid: string; view: { zoom: number; px: number; py: number } };
 };
 
 /** 옛 슬롯을 블록으로 — ★칸 하나는 **블록 하나**다 (`slotBlock`, 2026-08-20).

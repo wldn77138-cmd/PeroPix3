@@ -425,6 +425,8 @@ export function App() {
             ? `${thumbAsk.type}:${
                 "section" in thumbAsk
                   ? thumbAsk.section
+                  : "cellId" in thumbAsk
+                    ? thumbAsk.cellId
                   : "cardId" in thumbAsk
                     ? thumbAsk.cardId
                     : thumbAsk.card.id
@@ -454,6 +456,8 @@ export function App() {
                   banner: defaultView(),
                   boxes: [{ key: "face", label: tGlobal("thumb.inCard"), w: 138, h: 118, view: defaultView() }],
                 }
+            : thumbAsk.type === "scene-cell"
+              ? { url: thumbAsk.img.url, boxes: [{ key: "face", label: "씬 썸네일", w: 120, h: 160, view: defaultView() }] }
               : {
                   url: thumbAsk.img.url,
                   // ★카드는 **배너로도 앞면으로도** 뜬다 (같은 tid, 보는 방식만 다르다) —
@@ -491,6 +495,15 @@ export function App() {
                 banner: r.banner ?? defaultView(),
                 face: r.boxes.face ?? defaultView(),
               });
+            } else if (t.type === "scene-cell") {
+              // 내 판: 씬 한 줄의 그림 (`src/custom/sceneExtras.tsx`)
+              const ws = useWs.getState();
+              const tab = ws.spec?.sceneGroups.find((x) => x.id === t.groupId);
+              const card = tab?.kind === "sceneGroup" ? tab.cards.find((k) => k.id === t.cardId) : undefined;
+              if (card)
+                ws.setCard(t.groupId, t.cardId, {
+                  cells: card.cells.map((c) => (c.id === t.cellId ? { ...c, thumb: { tid, view: r.boxes.face ?? defaultView() } } : c)),
+                });
             } else if (t.type === "scene-card") {
               // ★씬 카드의 그림은 **탭이 든다** (`SceneCard.thumb`) — 덱 카드와 다른 자리다.
               //   덱으로 저장하면 그때 카드가 자기 것으로 한 벌 갖는다.
