@@ -334,6 +334,59 @@ defineAction({
   },
 });
 
+defineAction({
+  id: "set_character_on",
+  desc: "★**캐릭터 카드 하나를 켜고 끈다** — 꺼진 카드는 생성에 안 나간다 (카드 머리의 ●/○ 와 같다). "
+    + "«메이드는 빼고 뽑아 줘»·«키키 다시 넣어» 가 이것이다. "
+    + "★켜기는 모델의 캐릭터 수 상한에 막힐 수 있다 — 막히면 켜지 않고 그렇게 답한다. 끄기는 언제나 된다.",
+  args: {
+    character: { type: "string", desc: "캐릭터 카드 — id 또는 이름", required: true },
+    on: { type: "boolean", desc: "켤지(true) 끌지(false)", required: true },
+    workspace: { type: "string", desc: "어느 워크스페이스 — 비우면 지금 열린 것 (다르면 거절한다)" },
+    tab: { type: "string", desc: "어느 탭 — id 가 정확하다 (이름도 받는다). 비우면 말을 건 때의 탭" },
+    sceneGroup: { type: "string", desc: "어느 씬 그룹 — **id 로** 줘라 (이름은 탭마다 겹친다). 비우면 말을 건 때의 씬 그룹" },
+  },
+  confirm: "none",
+  run: async (a) => {
+    if (typeof a.on !== "boolean")
+      return err("unknown_field", "on 은 true 또는 false 여야 합니다.", { given: String(a.on), retry: "safe" });
+    const { openAddress, findChar } = await import("./promptEdit.ts");
+    // ★켜기는 카드 머리의 ● 와 같은 길로 — 모델 상한을 그쪽이 지킨다
+    const { toggleCharCapped, charLimit } = await import("../store/gen");
+    const o = openAddress(a);
+    if ("error" in o) return o;
+    const key = String(a.character ?? "").trim();
+    if (!key) return err("unknown_field", "character 를 주세요.");
+    const f = findChar(key);
+    if ("error" in f) return f;
+    if ("none" in f)
+      return err("not_found", `그런 캐릭터 카드가 없습니다: ${key}`, {
+        what: "character", given: key, candidates: usePrompt.getState().chars.map((c) => `${c.id}: ${c.name}`),
+      });
+    const id = f.hit.id;
+    const was = usePrompt.getState().chars.find((c) => c.id === id)?.on ?? false;
+    if (was !== a.on) toggleCharCapped(id);
+    const now = usePrompt.getState().chars.find((c) => c.id === id)?.on ?? false;
+    if (now !== a.on)
+      return err("blocked", `이 모델은 한 장에 캐릭터 ${charLimit()}명까지입니다 — 「${f.hit.name}」 를 켜지 못했습니다.`, { retry: "never" });
+    return {
+      ok: true,
+      character: id,
+      on: now,
+      did: was === now
+        ? `${o.where}의 「${f.hit.name}」 는 이미 ${now ? "켜져" : "꺼져"} 있음`
+        : `${o.where}의 「${f.hit.name}」 를 ${now ? "켬" : "끔"}`,
+      at: {
+        kind: "prompt",
+        workspace: useWs.getState().current ?? undefined,
+        tab: useWs.getState().spec?.activeTab,
+        sceneGroup: o.set.id,
+      },
+      before: { action: "set_character_on", args: { character: id, on: was, sceneGroup: o.set.id } },
+    };
+  },
+});
+
 /* ── 생성 옵션 ────────────────────────────────────────────────
    ★값 하나하나에 액션을 만들지 않는다 — **범용 창구 하나**다 (목표 ①: 예외를 열거하면
      반드시 빠뜨린다). 대신 **허용 목록**으로 아무 이름이나 들어오는 것을 막는다. */

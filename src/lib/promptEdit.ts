@@ -40,7 +40,7 @@ export function sceneBlocks() {
   const strip = (b: Block) => ({ id: b.id, label: b.label, on: b.on, tags: b.tags });
   return {
     base: p.base.map(strip),
-    chars: p.chars.map((c) => ({ id: c.id, name: c.name, prompt: (c.prompt ?? []).map(strip) })),
+    chars: p.chars.map((c) => ({ id: c.id, name: c.name, on: c.on, prompt: (c.prompt ?? []).map(strip) })),
   };
 }
 
