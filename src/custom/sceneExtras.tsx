@@ -14,6 +14,7 @@ import { useGen } from "../store/gen";
 import { useSceneFocus } from "../store/sceneFocus";
 import { toast } from "../store/toast";
 import { newestFirst } from "../lib/takes";
+import { cardLocked } from "../lib/sceneCards";
 import type { Rec, SceneCard, Slot } from "../store/workspace";
 
 const pinUrl = (base: string, tid: string) => `${base}/api/pin/${tid}`;
@@ -143,7 +144,8 @@ export function SceneThumb({
 export function pickLatest(cards: SceneCard[], takesOf: (c: Slot) => Rec[]) {
   const got: { cell: string; file: string }[] = [];
   for (const k of cards) {
-    if (k.locked) continue;
+    // ★3.7.2 부터 카드는 잠금을 따로 들지 않는다 — 씬이 전부 잠겼으면 잠긴 카드다
+    if (cardLocked(k)) continue;
     for (const c of k.cells) {
       const top = [...takesOf(c)].sort(newestFirst)[0];
       if (top) got.push({ cell: c.id, file: top.file });
