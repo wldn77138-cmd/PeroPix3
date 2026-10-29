@@ -399,7 +399,9 @@ async function flushSpec(out: Record<string, unknown>) {
  *  ★등록되지 않은 이름은 아래 옛 분기로 내려간다 — 프롬프트 편집처럼 아직 옮기지 않은 것들이다.
  */
 // ★플러그인 호스트(`lib/pluginHost`)도 이 창구를 쓴다 — `ask=false` 로, 승인 카드를 지나지 않는다 (2026-09-07)
-export async function runAction(action: string, args: Record<string, any>, ask = true): Promise<Record<string, unknown>> {
+// ★`flush: false` 는 디스크 저장을 기다리지 않는다 (내 판, 2026-10-29) — 화면 스토어만 읽는 플러그인이 청하는 것이다.
+//   저장은 편집이 예약한 디바운스대로 곧 나간다 (`setPromptSaver`). 조수 경로는 그대로 기다린다
+export async function runAction(action: string, args: Record<string, any>, ask = true, opts: { flush?: boolean } = {}): Promise<Record<string, unknown>> {
   /* ★★**보낸 시점의 화면이 「지금 자리」다** (사용자 지시 2026-09-07). 사용자가 말을 건 뒤 탭을
      옮겨도 조수의 편집·생성은 말을 건 그 자리에 간다 — 실행 직전에 화면을 그 주소로 맞춘다
      (`lib/promptEdit.alignToTurn`). 워크스페이스가 다르면 거절이다.
@@ -408,7 +410,7 @@ export async function runAction(action: string, args: Record<string, any>, ask =
   const { alignToTurn, MOVERS, screenAddr } = await import("../lib/promptEdit");
   const mis = alignToTurn(action);
   if (mis) return mis as unknown as Record<string, unknown>;
-  const out = await runActionAt(action, args, ask);
+  const out = await runActionAt(action, args, ask, opts);
   if (MOVERS.has(action) && out && out.ok === true) {
     const { useLlm } = await import("./llm");
     if (useLlm.getState().sending) useLlm.setState({ turnAddr: screenAddr() });
@@ -416,7 +418,7 @@ export async function runAction(action: string, args: Record<string, any>, ask =
   return out;
 }
 
-async function runActionAt(action: string, args: Record<string, any>, ask = true): Promise<Record<string, unknown>> {
+async function runActionAt(action: string, args: Record<string, any>, ask = true, opts: { flush?: boolean } = {}): Promise<Record<string, unknown>> {
   const [{ getAction }, { askApprove, needsAsk }] = await Promise.all([
     import("../lib/actions"),
     import("../lib/approve"),
@@ -445,7 +447,7 @@ async function runActionAt(action: string, args: Record<string, any>, ask = true
           return { error: { code: "refused", message: "사용자가 승인하지 않았습니다.", retry: "never" } };
       }
       const out = (await def.run(args)) as Record<string, unknown>;
-      await flushSpec(out);
+      if (opts.flush !== false) await flushSpec(out);
       return out;
     } catch (e) {
       return { error: { code: "blocked", message: String((e as Error).message ?? e), retry: "unsafe" } };

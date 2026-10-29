@@ -209,8 +209,9 @@ export function hostApi(p: PluginInfo) {
       if (q) putOnCanvas(q);
     },
     /** 앱 액션·백엔드 도구 — 조수가 쓰는 것과 같은 목록(`GET /api/agent/tools`). ★승인 카드를 지나지 않는다 */
-    action: async (name: string, args: Record<string, unknown> = {}) => {
-      const out = await runAction(name, args, false);
+    /*  ★`opts.flush: false` — 디스크 저장을 기다리지 않는다 (내 판). 고친 뒤 `scene()` 만 읽는 플러그인용이다 */
+    action: async (name: string, args: Record<string, unknown> = {}, opts: { flush?: boolean } = {}) => {
+      const out = await runAction(name, args, false, opts);
       // ★★앱 액션이 아니면 **백엔드 도구**로 넘긴다 (`get_workspace` 처럼 읽기만 하는 것들). 플러그인에게는
       //   「이름은 도구 목록과 같다」고 안내해 놓고 앱 액션만 되던 구멍이었다 — 태그 굴리기가 지금 씬의 블록을
       //   읽으려다 「모르는 행동」을 받고 조용히 아무것도 못 했다 (실측 2026-09-11).
