@@ -1,6 +1,6 @@
 # 원본 릴리즈를 따라간다 — **이 포크에만 있는 파일**이다.
 #
-# 원본(mrm987/PeroPix3)에 새 릴리즈가 나오면 그 태그를 master 에 합치고,
+# 원본(mrm987/PeroPix3)에 새 릴리즈가 나오면 그 태그를 합치고, **빌드 시험을 통과하면** master 에 올린 뒤
 # `v<원본 버전>-custom` 태그를 밀어 `Release` 워크플로(release.yml)가 내 판을 짓게 한다.
 # 다 지어지면 `publish-custom.yml` 이 초안을 공개하고, 앱은 그것을 업데이트로 받는다
 # (`backend/update.py` 의 `REPO` 가 이 포크를 본다).
@@ -12,8 +12,12 @@
 # ★★`SYNC_TOKEN` 이 있어야 한다 (저장소 Settings ▸ Secrets ▸ Actions). 기본 `GITHUB_TOKEN` 으로는
 #   ① 원본이 `.github/workflows` 를 고친 판을 합쳐 밀 수 없고 ② 민 태그가 다른 워크플로를 깨우지 않는다.
 #   권한: 이 저장소 하나 · Contents 읽기/쓰기 · Workflows 읽기/쓰기.
-# ★합치다 부딪히면(원본이 내 수정과 같은 줄을 고쳤으면) 여기서 실패하고 메일이 간다.
-#   그때는 손으로 합친 뒤 이 워크플로를 다시 돌린다. 앱은 이전 판에 그대로 머문다.
+# ★★막히는 두 자리 (2026-10-29):
+#   ① 합치기 충돌 — 원본이 내 수정과 같은 줄을 고쳤다. 단 `backend/actions.json` 만 부딪혔으면 소스에서
+#     다시 뽑아 스스로 푼다 (자동 생성 파일이라 어느 쪽을 고를 일이 아니다).
+#   ② 합쳐졌는데 빌드가 깨짐 — 내 코드가 원본에서 사라지거나 바뀐 것을 쓴다 (3.7.2 의 카드 `locked` 가 그랬다).
+#   어느 쪽이든 **master 에 올리지 않고** 저장소에 이슈를 연다 (Settings ▸ General ▸ Issues 가 켜져 있어야 한다).
+#   손으로 고친 뒤 이 워크플로를 다시 돌리면 된다. 앱은 그동안 이전 판에 그대로 머문다.
 name: Sync upstream (custom)
 
 on:
@@ -28,6 +32,7 @@ concurrency:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   sync:
@@ -38,7 +43,12 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.SYNC_TOKEN }}
 
-      - name: 원본 최신 릴리즈를 합치고 내 태그를 민다
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 원본 최신 릴리즈를 합친다
+        id: merge
         env:
           GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
         run: |
@@ -46,9 +56,12 @@ jobs:
           UP=$(gh api repos/mrm987/PeroPix3/releases/latest --jq .tag_name)
           MINE="${UP}-custom"
           echo "원본 최신: $UP → 내 태그: $MINE"
+          echo "up=$UP" >> "$GITHUB_OUTPUT"
+          echo "mine=$MINE" >> "$GITHUB_OUTPUT"
 
           if git ls-remote --exit-code --tags origin "refs/tags/$MINE" >/dev/null; then
             echo "이미 지었다 — 할 일 없음"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -57,8 +70,81 @@ jobs:
           git remote add upstream https://github.com/mrm987/PeroPix3.git
           # ★태그 하나만 받는다 — 원본 태그 전부를 받으면 아래 push 에 딸려 갈 수 있다
           git fetch --no-tags upstream "refs/tags/$UP:refs/upstream-tags/$UP"
-          git merge --no-edit -m "원본 $UP 합침" "refs/upstream-tags/$UP"
 
+          if ! git merge --no-edit -m "원본 $UP 합침" "refs/upstream-tags/$UP"; then
+            CONFLICTS=$(git diff --name-only --diff-filter=U)
+            echo "부딪힌 파일:"; echo "$CONFLICTS"
+            if [ "$CONFLICTS" = "backend/actions.json" ]; then
+              git checkout --theirs backend/actions.json
+              node scripts/gen-actions.mjs
+              git add backend/actions.json
+              git commit --no-edit
+              echo "actions.json 충돌을 다시 뽑아서 풀었다"
+            else
+              {
+                echo "### 합치기 충돌"
+                echo
+                echo "원본 \`$UP\` 를 합치다 아래 파일에서 부딪혔습니다. 원본이 내 수정과 같은 자리를 고쳤으니 손으로 합쳐야 합니다."
+                echo
+                echo "$CONFLICTS" | sed 's/^/- `/; s/$/`/'
+              } > /tmp/why.md
+              git merge --abort
+              exit 1
+            fi
+          fi
+
+          # ★합친 뒤 행동 목록이 소스와 어긋나 있으면 다시 뽑아 함께 올린다
+          node scripts/gen-actions.mjs
+          if ! git diff --quiet -- backend/actions.json; then
+            git add backend/actions.json
+            git commit -m "행동 목록 다시 뽑음 ($UP 합친 뒤)"
+          fi
+
+      - name: 빌드 시험 — 통과해야만 올린다
+        if: steps.merge.outputs.skip != 'true'
+        run: |
+          set -o pipefail
+          npm ci
+          if ! (npx tsc -b && npx vite build) 2>&1 | tee /tmp/build.log; then
+            {
+              echo "### 빌드 시험 실패"
+              echo
+              echo "원본 \`${{ steps.merge.outputs.up }}\` 와 합쳐지기는 했지만 빌드가 깨집니다. 커스텀 코드가 원본에서 사라지거나 바뀐 것을 쓰고 있을 가능성이 큽니다. master 에는 올리지 않았습니다."
+              echo
+              echo '```'
+              grep -iE "error" /tmp/build.log | head -30
+              echo '```'
+            } > /tmp/why.md
+            exit 1
+          fi
+
+      - name: master 에 올리고 내 태그를 민다
+        if: steps.merge.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
           git push origin HEAD:master
-          git tag "$MINE"
-          git push origin "refs/tags/$MINE"
+          git tag "${{ steps.merge.outputs.mine }}"
+          git push origin "refs/tags/${{ steps.merge.outputs.mine }}"
+
+      - name: 실패하면 이슈로 알린다
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UP: ${{ steps.merge.outputs.up }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          TITLE="원본 ${UP:-새 릴리즈} 따라가기 실패"
+          # ★같은 제목의 열린 이슈가 있으면 새로 열지 않는다 — 6시간마다 같은 실패로 이슈가 쌓이지 않게
+          OPEN=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "\"$TITLE\" in:title" --json number --jq '.[0].number // empty' || true)
+          if [ -n "$OPEN" ]; then
+            echo "이미 열린 이슈 #$OPEN — 새로 열지 않음"
+            exit 0
+          fi
+          {
+            if [ -f /tmp/why.md ]; then cat /tmp/why.md; else echo "### 실패"; echo; echo "실행 기록에서 빨간 단계를 보십시오."; fi
+            echo
+            echo "실행 기록: $RUN"
+            echo
+            echo "앱은 이전 판에 그대로 머뭅니다. 고친 뒤 이 워크플로(Sync upstream (custom))를 다시 돌리면 이 이슈는 닫아도 됩니다."
+          } > /tmp/body.md
+          gh issue create -R "$GITHUB_REPOSITORY" --title "$TITLE" --body-file /tmp/body.md
