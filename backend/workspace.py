@@ -28,11 +28,18 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+from durable import write_synced
+import rebuild
 import recordsdb
 import thumbs
 import trash
 
 SPEC_NAME = "workspace.json"
+#: ★★`workspace.json` 의 **마지막으로 온전했던 사본 한 벌** (`save` 의 ★★주). 읽지 못하면 여기서 되살린다 (`load`).
+SPEC_BAK = SPEC_NAME + ".bak"
+#: 사본을 새로 뜨는 간격(초) — 자동 저장은 400ms 마다 올 수 있어 저장마다 뜨면 디스크만 닳는다.
+#  되살렸을 때 잃는 편집이 이 시간 안쪽이라는 뜻이기도 하다.
+SPEC_BAK_EVERY = 60
 RECORDS_NAME = "records.jsonl"
 #: ★★**무거운 것은 따로 둔다** (사용자 결정 2026-08-22).
 #:
@@ -138,6 +145,24 @@ def unique_name(base: str, used) -> str:
     return f"{base} {n}"
 
 
+class SpecCorrupt(ValueError):
+    """`workspace.json` 을 읽지 못하고 되살릴 사본도 없다 (`Store.load`). 서버가 **422** 로 알린다 → 화면이 안내 창을 띄운다."""
+
+
+def _read_spec(p: Path) -> dict:
+    """★깨진 파일은 `ValueError` 로 끝난다 — `JSONDecodeError`·`UnicodeDecodeError` 둘 다 그 자식이다."""
+    spec = json.loads(p.read_text(encoding="utf-8"))
+    if not isinstance(spec, dict):
+        raise ValueError(f"{p.name} 이 객체가 아닙니다")
+    return spec
+
+
+def _write_durable(tmp: Path, target: Path, data: bytes) -> None:
+    """임시 파일에 쓰고 **디스크에 내린 뒤** 이름을 바꾼다 (`durable.py` 머리 주석)."""
+    write_synced(tmp, data)
+    Store._replace(tmp, target)
+
+
 class SpecMismatch(ValueError):
     """다른 워크스페이스의 spec 을 이 이름으로 쓰려 했다 (`Store.save` 의 ★★주). 서버는 409 로 돌려준다."""
 
@@ -154,6 +179,11 @@ class Store:
         #: 이 실행에서 **지운 워크스페이스의 id** (`save` 의 ★★주). 뒤늦게 온 저장이 지운
         #  워크스페이스를 도로 만드는 것을 막는다.
         self._buried: dict[str, str] = {}
+        #: 워크스페이스마다 사본을 마지막으로 뜬 때 (`time.monotonic`). ★처음 저장은 언제나 뜬다 — 켠 직후의 온전한 판이 남는다
+        self._baked: dict[str, float] = {}
+        #: **이 실행에서 사본으로 되살린 것** → 그 사본의 `updatedAt`. 부팅 이전 작업이 먼저 되살릴 수도 있어
+        #  화면이 그 워크스페이스를 열 때까지 들고 있다가 한 번 건넨다 (`take_recovered`).
+        self._recovered: dict[str, str] = {}
         #: ★★그림이 옮겨졌을 때 **워크스페이스 밖**에서 경로를 든 곳을 고치는 자리 (2026-10-01).
         #:  `fn("<ws>/<옛 상대경로>") → "<ws>/<새 상대경로>" | None`. 서버가 단다 (보관함 출처 · 파일 관리 휴지통).
         #:  이 모듈은 그 저장소들을 모른다 — 밖의 뿌리를 아는 것은 서버다.
@@ -255,17 +285,113 @@ class Store:
         p = self.dir_of(ws) / SPEC_NAME
         if not p.exists():
             return None
-        return json.loads(p.read_text(encoding="utf-8"))
+        try:
+            return _read_spec(p)
+        except ValueError:
+            return self._recover(ws)
+
+    def _recover(self, ws: str) -> dict:
+        """깨진 `workspace.json` 을 사본으로 되살린다. 사본도 없거나 깨졌으면 `SpecCorrupt`.
+
+        ★**파일을 고치기 전에 베낀다** — 깨진 원본은 `workspace.json.broken-<시각>` 으로 남는다. 손으로 살릴 여지가 있다.
+        ★★읽기가 파일을 고치는 유일한 자리다. `load` 하나에 두어 화면·조수·부팅 이전이 전부 같은 처리를 거친다."""
+        d = self.dir_of(ws)
+        p = d / SPEC_NAME
+        with self.locked(ws):
+            try:
+                return _read_spec(p)    # ★잠금을 기다리는 동안 다른 요청이 이미 되살렸다
+            except ValueError:
+                pass
+            try:
+                spec = _read_spec(d / SPEC_BAK)
+            except (OSError, ValueError) as e:
+                print(f"[워크스페이스] {ws}: {SPEC_NAME} 이 깨졌는데 되살릴 사본이 없습니다 ({e!r})")
+                raise SpecCorrupt(str(p)) from e
+            (d / f"{SPEC_NAME}.broken-{datetime.now():%Y%m%d-%H%M%S}").write_bytes(p.read_bytes())
+            _write_durable(d / (SPEC_NAME + ".tmp"), p, (d / SPEC_BAK).read_bytes())
+            self._recovered[ws] = str(spec.get("updatedAt") or "")
+            print(f"[워크스페이스] {ws}: {SPEC_NAME} 이 깨져 사본({spec.get('updatedAt')})으로 되살렸습니다")
+            return spec
+
+    def _rebuild_plan(self, ws: str) -> tuple[dict, dict]:
+        d = self.dir_of(ws)
+        def read_env(r: dict) -> dict | None:
+            return recordsdb.get(d, r["key"]).get("env") if r.get("key") else None
+        return rebuild.build(ws, self.live_records(ws), read_env, self._last_stars(d))
+
+    def rebuild_preview(self, ws: str) -> dict:
+        """다시 만들면 무엇이 돌아오나 — 파일은 안 건드린다. 화면의 안내 문구가 이 수를 쓴다."""
+        return self._rebuild_plan(ws)[1]
+
+    def rebuild(self, ws: str) -> dict:
+        """깨진 `workspace.json` 을 그림 기록으로 다시 쓴다 (`rebuild.py`).
+        ★★**읽히는 파일은 절대 덮어쓰지 않는다** — 이 창구의 재료는 원본보다 언제나 적다.
+        ★깨진 원본은 베껴 둔다 (`_recover` 와 같다). 그림·색인은 안 건드린다."""
+        d = self.dir_of(ws)
+        p = d / SPEC_NAME
+        with self.locked(ws):
+            if not p.is_file() or self._readable(p):
+                raise ValueError(f"{ws}: {SPEC_NAME} 이 깨진 상태가 아닙니다")
+            spec, counts = self._rebuild_plan(ws)
+            if not counts["images"]:
+                raise ValueError(f"{ws}: 다시 만들 그림 기록이 없습니다")
+            (d / f"{SPEC_NAME}.broken-{datetime.now():%Y%m%d-%H%M%S}").write_bytes(p.read_bytes())
+            spec["updatedAt"] = datetime.now().isoformat(timespec="seconds")
+            _write_durable(d / (SPEC_NAME + ".tmp"), p, json.dumps(spec, ensure_ascii=False, indent=2).encode("utf-8"))
+            print(f"[워크스페이스] {ws}: 그림 기록으로 다시 만들었습니다 {counts}")
+            return counts
+
+    @staticmethod
+    def _readable(p: Path) -> bool:
+        try:
+            _read_spec(p)
+            return True
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _last_stars(d: Path) -> list[str]:
+        """`stars.jsonl` 의 마지막 줄 — 별표의 이력이다 (`STARS_NAME`)."""
+        p = d / STARS_NAME
+        if not p.is_file():
+            return []
+        lines = p.read_bytes().splitlines()
+        if not lines:
+            return []
+        try:
+            return [str(f) for f in json.loads(lines[-1].decode("utf-8")).get("starred") or []]
+        except ValueError:
+            return []
+
+    def take_recovered(self, ws: str) -> str | None:
+        """이 워크스페이스를 사본으로 되살렸으면 그 사본의 시각을 **한 번** 돌려준다 — 화면이 알릴 재료다."""
+        return self._recovered.pop(ws, None)
+
+    def _keep_spec_copy(self, ws: str) -> None:
+        """지금 디스크의 `workspace.json`(방금 읽어 온전함을 확인한 것)을 사본으로 뜬다.
+        ★사본을 못 떠도 저장은 막지 않는다 — 사본은 보험이고 저장이 본체다."""
+        now = time.monotonic()
+        if now - self._baked.get(ws, -SPEC_BAK_EVERY) < SPEC_BAK_EVERY:
+            return
+        d = self.dir_of(ws)
+        try:
+            _write_durable(d / (SPEC_BAK + ".tmp"), d / SPEC_BAK, (d / SPEC_NAME).read_bytes())
+            self._baked[ws] = now
+        except OSError as e:
+            print(f"[워크스페이스] {ws}: 사본을 못 떴습니다 ({e!r})")
 
     def save(self, ws: str, spec: dict) -> dict:
         """작업 상태를 쓴다.
 
-        ★★**백업을 두지 않는다** (사용자 결정 2026-08-25). 한때 여기서 덮어쓰기 직전 내용을
-          `.bak/` 에 남겼는데 두 가지가 틀렸다:
+        ★★**쌓이는 백업은 두지 않는다** (사용자 결정 2026-08-25). 한때 여기서 덮어쓰기 직전 내용을
+          `.bak/` 에 쌓았는데 두 가지가 틀렸다:
             · **자리가 틀렸다.** 이 함수는 사용자의 자동 저장(400ms 디바운스)·조수·되돌리기가
               **전부 지나는 공통 통로**라, 조수 대비로 넣은 것이 **사용자가 타이핑하는 동안**
               대부분 만들어졌다 (실측: 1초에 세 판 · 워크스페이스 하나에 3.8MB).
             · **꺼낼 창구가 없었다.** 앱에 「백업에서 되돌리기」가 없어 손으로 덮어야 했다.
+          ★★**파일이 깨졌을 때 쓸 사본은 한 벌 둔다** (사용자 지시 2026-11-04: *"못 읽었다고 끝내면 복구할
+            방법이 없을텐데"*). 위 두 가지를 피한다: 같은 자리에 덮어써서 늘지 않고(`SPEC_BAK`, 1분에 한 번),
+            꺼내는 것은 읽기가 알아서 한다 (`_recover`). 조수의 실수를 되돌리는 용도가 아니다.
           ★조수의 실수는 **사전에** 막는다 — 승인 카드(`docs/agent-actions-design.md` 2-5)와
             `apply` 의 허용 목록, 그리고 되돌리기 이력(`backend/agentlog.py`)이 그 일을 한다.
         ★「탭 0개면 거절」 같은 검사도 두지 않는다 — 이 코드에는 **탭 0개인 spec 이 만들어지는
@@ -302,10 +428,10 @@ class Store:
                 return spec
             d.mkdir(parents=True, exist_ok=True)
             spec["updatedAt"] = datetime.now().isoformat(timespec="seconds")
-            # 임시 파일에 쓴 뒤 교체 — 쓰는 중 앱이 죽어도 기존 파일이 남는다
-            tmp = d / (SPEC_NAME + ".tmp")
-            tmp.write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
-            self._replace(tmp, d / SPEC_NAME)
+            if cur is not None:
+                self._keep_spec_copy(ws)
+            # 임시 파일에 쓴 뒤 교체 — 쓰는 중 앱이나 OS 가 죽어도 기존 파일이 남는다
+            _write_durable(d / (SPEC_NAME + ".tmp"), d / SPEC_NAME, json.dumps(spec, ensure_ascii=False, indent=2).encode("utf-8"))
             self._note_stars(d, spec)
         return spec
 

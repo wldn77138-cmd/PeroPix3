@@ -1,11 +1,10 @@
 /** Danbooru 태그 사전 — 페로픽스파이(`ui/src/tags/tagData.ts`)에서 이식.
  *
- *  `public/tags.json` 68,427개(2026-01-18 시점)를 **한 번** 읽어 첫 글자 인덱스를 만들고,
+ *  `public/tags.json` 79,437개(2026-10-01 목록, `scripts/update-tags.py`)를 **한 번** 읽어 첫 글자 인덱스를 만들고,
  *  `startsWith` → 모자라면 `includes` 두 단계로 찾는다.
  *
  *  ★사전은 **읽기만 한다.** 코드가 고치지 않는다.
- *  ★한국어 별칭은 없다 — 공개된 한국어 단부루 태그 데이터셋이 없다(2026-08-07 조사,
- *    일본어·중국어는 있다). 필요해지면 별도 파일로 얹되 이 파일은 그대로 둔다. */
+ *  ★한글 검색은 `public/tags-ko.json` 을 얹어서 한다 (사용자 결정 2026-11-04, `scripts/update-tags-ko.py`). */
 
 export type TagEntry = {
   label: string;
@@ -15,6 +14,10 @@ export type TagEntry = {
   type: string;
   category: number;
   aliases?: string[];
+  /** 목록에 보이는 한글 이름 (`tags-ko.json` 의 첫 칸) */
+  ko?: string;
+  /** 한글로 찾았을 때의 이름. 찾은 말이 앞에 온다 (`치파오, 차이나 드레스`) */
+  koHit?: string;
   _lower?: string;
 };
 
@@ -24,7 +27,7 @@ export type TagEntry = {
  *    (`backend/agent.py`)는 `tags.json` **파일만** 읽어서, 여기 얹은 V5 태그와 `nsfw`/`sfw` 를
  *    「없다」고 판단했다 — 같은 정보에 창구가 둘로 갈린 자리였다.
  *    이제 **프런트와 백엔드가 같은 두 파일**을 읽는다 (`tags.json` + `tags-extra.json`).
- *  ★`tags.json`(단부루 덤프)은 **손대지 않는다.** 우리가 더하는 것만 따로 둔다.
+ *  ★`tags.json`(단부루 덤프)은 **손으로 고치지 않는다** (`scripts/update-tags.py` 만 쓴다). 우리가 더하는 것만 따로 둔다.
  *  ★`count` 가 0 인 것은 사용량 자료가 없다는 뜻이다 — 지어내지 않는다.
  */
 
@@ -34,11 +37,16 @@ export type TagEntry = {
  *    예전에는 화면이 질의의 띄어쓰기를 밑줄로 바꿔 던졌는데(`word.replace(/ /g,"_")`),
  *    그러면 **띄어쓰기 표기의 태그는 영영 안 걸린다.** 한쪽으로 맞추는 자리를 여기 하나로 둔다. */
 const norm = (s: string) => s.toLowerCase().replace(/_/g, " ");
+/** 친 말의 표기. 사전의 이름은 괄호 앞이 언제나 띄어져 있어 붙여 친 것(`rem(re`)도 띄어서 찾는다 */
+const queryNorm = (s: string) => norm(s).replace(/([\p{L}\p{N}])\(/gu, "$1 (");
 
 let ALL: TagEntry[] = [];
 let INDEX: Record<string, TagEntry[]> = {};
 let loaded = false;
 let loading: Promise<void> | null = null;
+let KO_RAW: Record<string, string[]> = {};
+/** 한글 검색판. ★처음 한글을 칠 때 한 번 만든다 (영어만 쓰면 안 만든다) */
+let KO: { t: TagEntry; keys: { word: string; flat: string; parts: string[] }[] }[] | null = null;
 
 export const tagsLoaded = () => loaded;
 
@@ -68,11 +76,18 @@ export function loadTags(): Promise<void> {
       }
     };
     // ★★두 파일이 **정본**이다. 백엔드의 `search_tags` 도 같은 둘을 읽는다 (위 ★★주)
-    const [tags, EXTRA] = await Promise.all([grab("/tags.json"), grab("/tags-extra.json")]);
+    const [tags, EXTRA, ko] = await Promise.all([
+      grab("/tags.json"),
+      grab("/tags-extra.json"),
+      // ★없어도 영어 검색은 돈다. 실패하면 `grab` 이 빈 배열을 주고, 배열에는 태그 이름의 키가 없다
+      grab("/tags-ko.json") as unknown as Promise<Record<string, string[]>>,
+    ]);
+    KO_RAW = ko;
     const index: Record<string, TagEntry[]> = {};
     const seen = new Set<string>();
     for (const t of tags) {
       t._lower = norm(t.label);
+      t.ko = ko[t.value]?.[0];
       seen.add(t._lower);
       (index[t._lower[0]] ||= []).push(t);
     }
@@ -89,9 +104,49 @@ export function loadTags(): Promise<void> {
   return loading;
 }
 
+const HANGUL = /[가-힣ㄱ-ㅎㅏ-ㅣ]/;
+const squeeze = (s: string) => s.replace(/ /g, "");
+
+/** 검색할 만큼 쳤나. 영어는 두 글자부터, 한글은 완성된 한 글자부터 (`눈` · `귀` 도 태그가 된다).
+ *  ★가중치(`1.5`)를 치는 중에는 찾지 않는다 */
+export const queryReady = (q: string) => (q.length >= 2 && !/^-?\d*\.\d*$/.test(q)) || /^[가-힣]$/.test(q);
+
+/** 한글 키워드 검색. ★낱말 시작만 본다 (중간까지 보면 `장발` 에 `심장발작` 이 걸린다).
+ *  키워드 전체가 같은 것 → 앞부터 일치 → 낱말 시작 차례이고, 그 안에서는 사전 차례(게시물 수)다.
+ *  ★띄어쓰기는 안 가린다 (`긴머리` 로 `긴 머리` 를 찾는다). */
+function koScan(q: string, max: number, out: TagEntry[], pred?: (t: TagEntry) => boolean) {
+  KO ??= ALL.flatMap((t) => {
+    const raw = KO_RAW[t.value];
+    if (!raw?.length) return [];
+    const keys = [...raw[0].split(", "), ...raw.slice(1)].map((word) => {
+      const n = norm(word);
+      return { word, flat: squeeze(n), parts: n.split(" ") };
+    });
+    return [{ t, keys }];
+  });
+  const flat = squeeze(q);
+  const hits: { t: TagEntry; rank: number; word: string }[] = [];
+  for (const { t, keys } of KO) {
+    if (pred && !pred(t)) continue;
+    let rank = 3;
+    let word = "";
+    for (const k of keys) {
+      const r = k.flat === flat ? 0 : k.flat.startsWith(flat) ? 1 : k.parts.some((p) => p.startsWith(flat)) ? 2 : 3;
+      if (r < rank) [rank, word] = [r, k.word];
+    }
+    if (rank < 3) hits.push({ t, rank, word });
+  }
+  hits.sort((a, b) => a.rank - b.rank);     // ★안정 정렬이라 같은 칸에서는 사전 차례가 남는다
+  for (const { t, word } of hits.slice(0, max - out.length)) {
+    const rest = (t.ko ?? "").split(", ").filter((w) => w !== word);
+    out.push({ ...t, koHit: [word, ...rest].join(", ") });
+  }
+}
+
 /** 두 단계 검색: 첫 글자 인덱스(앞부터 일치) → 모자라면 전체(포함).
  *  `pred` 를 주면 그것을 통과한 항목만 센다 (종류로 거를 때). */
 function scan(q: string, max: number, out: TagEntry[], pred?: (t: TagEntry) => boolean) {
+  if (HANGUL.test(q)) koScan(q, max, out, pred);
   for (const t of INDEX[q[0]] ?? []) {
     if (out.length >= max) return;
     if (t._lower!.startsWith(q) && (!pred || pred(t)) && !out.includes(t)) out.push(t);
@@ -121,10 +176,10 @@ export function searchTags(
   max = 15,
   opt?: { /** 작가 결과에 `artist:` 를 달까 (`useUi.artistPrefix`) — 기본 켬 */ artistPrefix?: boolean },
 ): TagEntry[] {
-  if (!query || query.length < 2) return [];
+  if (!queryReady(query)) return [];
   const out: TagEntry[] = [];
   // ① 글자 그대로 — `meta:novel era` 처럼 콜론이 이름의 일부인 태그가 먼저다
-  scan(norm(query), max, out);
+  scan(queryNorm(query), max, out);
   /* ★★**작가는 언제나 `artist:` 를 달고 나간다** (사용자 지시 2026-08-28: *"아티스트 이름으로
        분류된 태그 입력하면 자동으로 앞에 artist: 붙여 주면 좋겠음"*). 접두어를 안 치고 `dai` 로
        찾아 골라도 `artist:dairi` 가 들어간다 — 목록에 보이는 글자가 곧 들어갈 글자다.
@@ -136,16 +191,32 @@ export function searchTags(
   // ② 접두어 뒤의 이름으로 **그 종류만** 뒤진다. 넣을 값에는 접두어를 도로 붙인다 —
   //    고르는 순간 `artist:` 가 사라지면 사용자가 친 뜻이 바뀐다
   const m = TYPE_PREFIX.exec(query);
-  if (m && m[2].length >= 2 && out.length < max) {
+  if (m && queryReady(m[2]) && out.length < max) {
     const type = m[1].toLowerCase();
     const found: TagEntry[] = [];
-    scan(norm(m[2]), max - out.length, found, (t) => t.type === type);
+    scan(queryNorm(m[2]), max - out.length, found, (t) => t.type === type);
     for (const t of found) {
       const p = prefixed(t, type);
       if (out.some((x) => x.value === p.value)) continue;
       out.push(p);
     }
   }
+  return out;
+}
+
+/** 목록에서 강조할 자리 — 친 말과 같은 글자만 켠다. 검색과 같이 대소문자·밑줄·띄어쓰기를 안 가린다 */
+export function markParts(text: string, query: string): { s: string; on: boolean }[] {
+  const chars = [...squeeze(norm(query.replace(TYPE_PREFIX, "$2")))];
+  if (!chars.length) return [{ s: text, on: false }];
+  const re = new RegExp(chars.map((c) => c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[ _]*"), "gi");
+  const out: { s: string; on: boolean }[] = [];
+  let at = 0;
+  for (const m of text.matchAll(re)) {
+    if (m.index > at) out.push({ s: text.slice(at, m.index), on: false });
+    out.push({ s: m[0], on: true });
+    at = m.index + m[0].length;
+  }
+  if (at < text.length) out.push({ s: text.slice(at), on: false });
   return out;
 }
 
@@ -166,14 +237,20 @@ export const underscoresToSpaces = (tag: string) =>
     return " ";
   });
 
-/** 커서가 놓인 '지금 낱말'. 쉼표·줄바꿈·괄호·콜론이 경계다.
- *  검색에는 커서 **앞부분만** 쓰고, 갈아 끼울 범위는 낱말 뒤 공백까지 먹는다. */
+/** 커서가 놓인 '지금 낱말'. 쉼표·줄바꿈·콜론 둘·이름 밖의 괄호가 경계다.
+ *  검색에는 커서 **앞부분만** 쓰고, 갈아 끼울 범위는 낱말 뒤 공백까지 먹는다.
+ *
+ *  ★★이름 안의 괄호는 태그 글자다 (사용자 지적 2026-11-04: *"괄호를 넣으면 바로 중단되던데"*).
+ *    사전의 2만여 개가 `캐릭터명_(작품명)` 꼴인데, 괄호가 늘 경계라서 `(` 를 치는 순간 낱말이 비어 목록이 닫혔다.
+ *    경계로 남는 것은 앞에 글자가 없는 여는 괄호(`(long_hair`)와 짝이 없는 닫는 괄호다.
+ *  ★★기호는 맞는 태그가 있을 때만 넘어간다 (사용자 결정 2026-11-04). `fate/gr` · `d.va` · `love_live!` 는 통째로 찾고,
+ *    맞는 것이 없으면 기호 뒤부터 찾는다 (`source#sm` · `a girl. sm`). 그래서 사전이 낱말 자르기에 관여한다. */
 export function currentWord(value: string, cursor: number) {
   // 어퍼스트로피도 태그 글자다 (`another's` 처럼 쓰는 태그가 있다)
-  const isTagChar = (c: string) => /[\p{L}\p{N}_\-\s']/u.test(c);
-  let start = cursor;
-  while (start > 0) {
-    const ch = value[start - 1];
+  const isTagChar = (c: string) => /[\p{L}\p{N}_\-\s':]/u.test(c);
+  let from = cursor;
+  while (from > 0) {
+    const ch = value[from - 1];
     if (ch === ":") {
       // ★★홑콜론은 **태그 글자**다 (`meta:novel era` · `honkai:_star_rail`).
       //   예전에는 경계라서, 콜론을 친 뒤에 고르면 앞의 `meta:` 가 남아
@@ -184,13 +261,31 @@ export function currentWord(value: string, cursor: number) {
       //   껐는데(`inEmphasis`), `-0.8::feet::` 처럼 강조 안에 태그를 쓰는 것이 흔해서
       //   되돌렸다 (사용자 지적 2026-08-21). 경계가 있으면 안쪽 낱말만 갈리므로
       //   `1.5::` 는 그대로 남는다.
-      if (value[start - 2] === ":" || value[start] === ":") break;
-      start--;
-      continue;
-    }
-    if (",\n\r{}[]()".includes(ch) || !isTagChar(ch)) break;
-    start--;
+      if (value[from - 2] === ":" || value[from] === ":") break;
+    } else if (",\n\r{}[]".includes(ch)) break;
+    from--;
   }
+  // 괄호의 짝은 앞에서부터 봐야 알 수 있다
+  const nameStart = (at: number) => {
+    let s = at;
+    let depth = 0;
+    for (let i = at; i < cursor; i++) {
+      if (value[i] === "(") {
+        if (value.substring(s, i).trim()) depth++;
+        else s = i + 1;
+      } else if (value[i] === ")") {
+        if (depth) depth--;
+        else s = i + 1;
+      }
+    }
+    return s;
+  };
+  const starts = [nameStart(from)];
+  for (let i = from; i < cursor; i++)
+    if (!isTagChar(value[i]) && value[i] !== "(" && value[i] !== ")") starts.push(nameStart(i + 1));
+  const start =
+    starts.slice(0, -1).find((s) => searchTags(value.substring(s, cursor).trim(), 1).length) ??
+    starts[starts.length - 1];
   let end = cursor;
   while (end < value.length && (value[end] === " " || value[end] === "\t")) end++;
   const head = value.substring(start, cursor);

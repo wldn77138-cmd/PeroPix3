@@ -333,6 +333,15 @@ export function Settings({
                         {t("settings.support")}
                       </button>
                     )}
+                    {/* ★CC BY-SA 4.0 의 저작자 표시다 (`THIRD-PARTY.md`). 지우면 그 데이터를 담을 수 없다 */}
+                    <button
+                      data-tags-ko-credit
+                      onClick={() => openExternal("https://huggingface.co/datasets/mengod-hf/danbooru-tags-kr")}
+                      style={{ ...btn, display: "inline-flex", alignItems: "center", gap: "var(--sp-2)" }}
+                    >
+                      {Icon.external}
+                      {t("settings.tagsKoCredit")}
+                    </button>
                   </div>
                 </Group>
               </>
@@ -410,9 +419,9 @@ const TABS = [
  *  적으면 안내가 곧 거짓말이 된다. 조작을 더하거나 걷으면 여기도 같이 고친다.
  *  ★설명은 i18n 에 산다 (`settings.keyGuide.*`) — 여기서는 어느 무리에 무엇이 드는지만 정한다. */
 const KEY_GROUPS: readonly (readonly [string, readonly string[]])[] = [
-  ["prompt", ["chipDelete", "chipWeight", "chipWeightBig", "chipReset", "chipDrag", "blockDrag",
+  ["prompt", ["chipDelete", "chipWeight", "chipWeightBig", "chipReset", "chipDrag", "blockDrag", "charDrag",
               "editEnter", "editShiftEnter", "editTab", "editEsc", "editUndo"]],
-  ["scene", ["pickMulti", "pickRange", "pickDelete", "pickClear", "arrowTake", "arrowScene", "wheelTake", "wheelZoom",
+  ["scene", ["pickMulti", "pickRange", "pickDelete", "pickSave", "pickClear", "arrowTake", "arrowScene", "wheelTake", "wheelZoom",
              "wheelLane", "sceneRename", "sceneTab", "dragGroup", "dragTab", "undo"]],
   ["gallery", ["galArrows", "galStar", "galMulti", "galRename", "galClose"]],
   ["censor", ["cenTools", "cenSize", "cenUndo", "cenRight", "cenWheel", "cenArrows"]],

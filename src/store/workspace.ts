@@ -5,6 +5,7 @@ import { useSceneFocus } from "./sceneFocus";
 import { usePrompt, defaultBase, defaultUc, type Char, type Thumb } from "./prompt";
 import { t } from "../i18n";
 import { toast, undoToast } from "./toast";
+import { askPick } from "./ask";
 import { withBusy } from "./busy";
 import { clearUndo, dropUndoZone, pushUndo } from "../lib/undo";
 import { uniqueName } from "../lib/uniqueName";
@@ -438,11 +439,63 @@ let moveBusy: string | null = null;
 /** 멈춰 있는 동안 저장이 들어왔나 — 끝나면 한 번 몰아서 쓴다 */
 let saveHeld = false;
 
+/** 서버가 깨진 파일을 사본으로 되살렸으면 알린다 — 그 사본 뒤의 편집이 빠졌을 수 있다 (`Store._recover`) */
+function noteRecovered(name: string, at: string | null | undefined) {
+  if (at == null) return;
+  toast(t("gate.recovered", { name, at: at.replace("T", " ") }), "warn");
+}
+
+/** 파일이 깨졌고 사본도 없을 때의 안내 — ★할 수 있는 것을 말한다: 그림 기록으로 복구하기 · 그 파일이 있는 폴더 열기.
+ *  ★★**누르면 무슨 일이 생기는지를 이 창이 전부 말한다** (사용자 지시 2026-11-04). 되찾는 것은 실제 수로, 되찾지
+ *    못하는 것은 전부 적는다 (`backend/rebuild.py` 의 머리 주석과 같아야 한다). */
+async function explainCorrupt(name: string, why: string) {
+  const url = `/api/workspaces/${encodeURIComponent(name)}/rebuild`;
+  const plan = await api<{ images: number; tabs: number; groups: number; cells: number; noPrompt: number; stars: number }>(url).catch(() => null);
+  const can = !!plan && plan.images > 0;
+  const path = why.slice(why.indexOf(": ") + 2);
+  const pick = await askPick({
+    title: t("gate.corruptTitle", { name }),
+    body: [
+      t("gate.corruptBody"),
+      ...(can
+        ? [
+            t("gate.rebuildBody", { ...plan, button: t("gate.rebuild") }),
+            ...(plan.noPrompt ? [t("gate.rebuildNoPrompt", { n: plan.noPrompt })] : []),
+          ]
+        : []),
+      t("gate.corruptBackup", { path }),
+    ].join("\n\n"),
+    options: [
+      ...(can ? [{ key: "rebuild", label: t("gate.rebuild") }] : []),
+      { key: "reveal", label: t("gate.corruptOpen") },
+    ],
+    cancel: t("common.close"),
+  });
+  if (pick === "reveal") {
+    await api("/api/files/reveal", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: `${name}/workspace.json` }),
+    }).catch((e) => toast(String(e), "warn"));
+  }
+  if (pick === "rebuild") {
+    try {
+      await api(url, { method: "POST" });
+    } catch (e) {
+      toast(String(e), "warn");
+      return;
+    }
+    await useWs.getState().open(name);
+    toast(t("gate.rebuilt", { name }));
+  }
+}
+
 /** 지금 워크스페이스를 서버에서 **다시** 읽는다 — 화면이 든 spec 을 버린다 (409 · 옮기기 뒤). */
 async function reload(get: () => S, set: (p: Partial<S>) => void): Promise<void> {
   const name = get().current;
   if (!name) return;
-  const r = await api<{ spec: Spec | null; records: Rec[] }>(`/api/workspaces/${encodeURIComponent(name)}`);
+  const r = await api<{ spec: Spec | null; records: Rec[]; recovered?: string | null }>(`/api/workspaces/${encodeURIComponent(name)}`);
+  noteRecovered(name, r.recovered);
   if (!r.spec || get().current !== name) return;
   const spec = keepView(migrate(r.spec), get().spec);   // ★보고 있는 탭은 화면이 정본이다 (`keepView`)
   clearUndo();
@@ -1070,9 +1123,19 @@ export const useWs = create<S>((set, get) => ({
     for (const fn of beforeWsSwitch) fn();
     await flushSave(get); // ★밀린 편집을 먼저 쓴다 (아래 flushSave 주석)
     set({ loading: true });
-    const r = await api<{ spec: Spec | null; records: Rec[] }>(
-      `/api/workspaces/${encodeURIComponent(name)}`,
-    );
+    let r: { spec: Spec | null; records: Rec[]; recovered?: string | null };
+    try {
+      r = await api(`/api/workspaces/${encodeURIComponent(name)}`);
+    } catch (e) {
+      /* ★★**여기서 `loading` 을 안 끄면 영영 로딩 화면이다** (제보 2026-11-04: 파일이 깨진 워크스페이스를 누르면
+           무한로딩이고 아무 안내가 없었다). 422 는 파일이 깨졌고 되살릴 사본도 없다는 뜻이다 (`Store.load`). */
+      set({ loading: false });
+      const why = String((e as Error).message);
+      if (why.startsWith("422")) void explainCorrupt(name, why);
+      else toast(t("gate.readFailed", { name }), "warn");
+      return;
+    }
+    noteRecovered(name, r.recovered);
     if (!r.spec) {
       /* ★★서버가 spec 을 못 줬다고 **새 spec 을 만들어 그 이름으로 저장하지 않는다** (2026-08-28).
          예전의 `r.spec ?? newSpec(name)` 은 읽기가 한 번만 헛돌아도(파일 교체 순간·잠금) 그
