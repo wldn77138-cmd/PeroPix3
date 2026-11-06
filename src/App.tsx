@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { api } from "./lib/backend";
 import { mark, flushBootTime } from "./lib/bootTime";
 import { watchErrors } from "./lib/report";
-import { Shell } from "./app/Shell";
+import { headBtn, Shell } from "./app/Shell";
 import { TitleBar } from "./app/TitleBar";
 import { WindowFrame } from "./app/WindowFrame";
 import { Icon } from "./components/Icon";
@@ -63,6 +63,9 @@ import { usePrompt, defaultView, normThumb, thumbUrl } from "./store/prompt";
 import { useCards } from "./store/cards";
 import { setThumbAsker, type ThumbTarget } from "./cards/thumbAsk";
 import { releaseFocusOnPress } from "./lib/releaseFocus";
+import { bootFloats, onEveryWindow, useFloat } from "./lib/floatWin";
+import { OnActiveWindow, SplitButton } from "./app/FloatWindow";
+import { Floats } from "./app/FloatAreas";
 
 /** 위치 잡는 창이 겨눌 수 있는 목적지 — 섹션 배너 또는 **덱 카드 한 장**.
  *
@@ -93,6 +96,9 @@ export function App() {
   const initWs = useWs((s) => s.init);
   const wsCurrent = useWs((s) => s.current);
   const wsLoading = useWs((s) => s.loading);
+  /** 프롬프트를 앱 밖 창으로 분리했나 — 그동안 생성 모드의 왼쪽은 레일뿐이다 */
+  const promptOut = useFloat((s) => !!s.live.prompt);
+  const wildcardOpen = useWildcards((s) => s.open);
   const loadCards = useCards((s) => s.load);
   const [ask, setAsk] = useState<SaveAsk | null>(null);
   const [thumbAsk, setThumbAsk] = useState<ThumbTarget | null>(null);
@@ -147,13 +153,18 @@ export function App() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Alt" && !e.ctrlKey && !e.shiftKey && !e.metaKey) e.preventDefault();
     };
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("keyup", onKey);
+    const offDown = onEveryWindow("keydown", onKey);
+    const offUp = onEveryWindow("keyup", onKey);
     return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("keyup", onKey);
+      offDown();
+      offUp();
     };
   }, []);
+
+  // ★분리해 둔 창은 워크스페이스가 뜬 뒤에 다시 연다 — 그려 넣을 내용이 그때 생긴다 (`lib/floatWin`)
+  useEffect(() => {
+    if (wsCurrent) void bootFloats();
+  }, [wsCurrent]);
 
   useEffect(() => {
     let alive = true;
@@ -274,10 +285,13 @@ export function App() {
         </div>
         {/* 아직 목록을 읽는 중이면 모달을 안 띄운다 — 부팅 때 한 번 깜빡인다 */}
         {!wsLoading && <WorkspaceGate />}
-        <AskDialog />
-        <Toasts />
+        <OnActiveWindow>
+          <AskDialog />
+          <Toasts />
+        </OnActiveWindow>
         <TipLayer />
         <BusyOverlay />
+        <Floats onOpenSettings={() => openSettings("llm")} />
       </WindowFrame>
     );
 
@@ -333,6 +347,8 @@ export function App() {
            갤러리는 기둥을 쓴다(폴더·그림 정보). 검열·보조 도구는 **레일도 안 남긴다** —
            열 것이 없는 레일은 막다른 길이다. */
         hideLeft={mode !== "generate" && mode !== "gallery" && !comicLeft}
+        leftOut={mode === "generate" && promptOut}
+        leftHeaderRight={mode === "generate" ? <SplitButton area="prompt" style={headBtn} /> : undefined}
         hideRight={mode !== "generate" && mode !== "gallery" && mode !== "plugins"}
         left={
           mode === "gallery" ? (
@@ -422,6 +438,7 @@ export function App() {
       />
       {/* ★key 로 목적지·그림마다 창을 새로 만든다 — 안에서 잡아 둔 위치가
           부모 재렌더에 초기화되지 않게 하는 유일한 안전한 방법이다 */}
+      <OnActiveWindow hold={!!thumbAsk}>
       <ThumbDialog
         key={
           thumbAsk
@@ -530,20 +547,26 @@ export function App() {
           })();
         }}
       />
+      </OnActiveWindow>
       {settings && (
         <Settings tab={settings} onClose={closeSettings} />
       )}
       {/* ★모달이라 어느 모드에서나 한 자리에 매단다. 확인 창(`AskDialog`)보다 **위에**
           두지 않는다. 닫을 때 저장 여부를 묻는 창이 이 위에 떠야 한다 */}
-      <WildcardModal />
+      <OnActiveWindow hold={wildcardOpen}>
+        <WildcardModal />
+      </OnActiveWindow>
       {/* ★★밖에서 떨군 그림 가져오기 — **생성·갤러리에서만** 매단다.
           자동검열과 보조 도구에는 자기 드롭존이 이미 있고 그쪽도 창 전체로 받아서
           (`ExifTool` 의 `wide`), 여기까지 두면 한 번 떨군 것을 둘이 잡는다
           (v2 도 같은 자리에서 갈랐다: `!isInCensorMode() && !isInUtilityMode()`). */}
       {(mode === "generate" || mode === "gallery") && <DropImport />}
-      <StylePickDialog />
-      <AskDialog />
-      <Toasts />
+      <OnActiveWindow>
+        <StylePickDialog />
+        <AskDialog />
+        <Toasts />
+      </OnActiveWindow>
+      <Floats onOpenSettings={() => openSettings("llm")} />
       {/* 툴팁 층 — 화면 아무 데나 `data-tip` 을 달면 여기서 뜬다 (`components/Tip`) */}
       <TipLayer />
       <DragLayer />

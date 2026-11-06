@@ -42,7 +42,7 @@ export function wsTabAt(x: number, y: number): DropTarget | null {
   return name ? { kind: "ws", name } : null;
 }
 
-/** 그 화면 좌표 밑의 **탭** (없으면 `null`) — 씬 그룹을 받을 자리다. */
+/** 그 화면 좌표 밑의 **탭** (없으면 `null`) — 씬 그룹을 받을 자리다 */
 export function canvasTabAt(x: number, y: number): DropTarget | null {
   const id = document.elementFromPoint(x, y)?.closest("[data-tab]")?.getAttribute("data-tab");
   return id ? { kind: "tab", id } : null;

@@ -7,6 +7,9 @@ import { ResizeHandle } from "../components/ResizeHandle";
 import { PanelCollapseButton } from "../components/PanelCollapseButton";
 import { useUi } from "../store/ui";
 import { useLlm } from "../store/llm";
+import { dockArea, useFloat } from "../lib/floatWin";
+import { Icon } from "../components/Icon";
+import { SplitButton } from "./FloatWindow";
 
 /* ★기둥·틀은 **가장 어두운 바탕**(`--bg`)이다 — 페로픽스파이는 `.params-panel` 에
    바탕색이 아예 없어 body 의 `--bg` 가 그대로 비친다 (실측 2026-08-04). 밝은 톤(`--panel`)은
@@ -44,6 +47,8 @@ export function Shell({
   leftHeaderRight,
   /** 좌 패널 **옆**에 붙는 서랍 — 덮지 않고 나란히 선다 (블록 저장소) */
   leftDrawer,
+  /** 좌 패널의 내용을 앱 밖 창으로 분리했나 — 그동안은 레일만 남고, 누르면 메인으로 돌아온다 (`lib/floatWin`) */
+  leftOut,
 }: {
   left: ReactNode;
   right: ReactNode;
@@ -54,6 +59,7 @@ export function Shell({
   rightLabel: string;
   leftHeaderRight?: ReactNode;
   leftDrawer?: ReactNode;
+  leftOut?: boolean;
   titleLeft?: ReactNode;
   titleRight?: ReactNode;
   navRight?: ReactNode;
@@ -91,6 +97,8 @@ export function Shell({
   /** 접힌 레일의 점 — 도는 중인가 · 접어 둔 사이에 끝났는가 (`Rail` 의 `dot`) */
   const aiBusy = useLlm((s) => s.sending);
   const aiUnread = useLlm((s) => s.unread);
+  /** AI 어시스턴트를 앱 밖 창으로 분리했나 — 그동안은 레일만 남고, 누르면 메인으로 돌아온다 */
+  const aiOut = useFloat((s) => !!s.live.ai);
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
       <TitleBar left={titleLeft} right={titleRight} />
@@ -100,7 +108,16 @@ export function Shell({
           갤러리 모드의 좌측 기둥처럼 타이틀바 밑부터 하단바 위까지 세로로 다 쓴다. */}
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
         {ai &&
-          (aiCollapsed ? (
+          (aiOut ? (
+            <Rail
+              side="left"
+              label={t("ai.title")}
+              onExpand={() => dockArea("ai")}
+              tip={t("float.dock", { name: t("ai.title") })}
+              icon={Icon.popOut}
+              dot={aiBusy ? "busy" : null}
+            />
+          ) : aiCollapsed ? (
             /* ★★접어 두면 화면에 흔적이 없다 — 점 하나로 「도는 중」과 「끝났다」를 알린다
                  (사용자 지시 2026-08-26). 펴면 사라진다 (`useUi.toggleAi`). */
             <Rail
@@ -122,7 +139,12 @@ export function Shell({
                   borderRight: "1px solid var(--line)",
                 }}
               >
-                <PanelHeader side="left" title={t("ai.title")} onCollapse={toggleAi} />
+                <PanelHeader
+                  side="left"
+                  title={t("ai.title")}
+                  onCollapse={toggleAi}
+                  extra={<SplitButton area="ai" style={headBtn} />}
+                />
                 {ai}
               </section>
               <ResizeHandle
@@ -149,47 +171,30 @@ export function Shell({
           )}
 
           <main style={{ flex: 1, display: "flex", minHeight: 0 }}>
-        {hideLeft ? null : leftCollapsed ? (
-          <Rail side="left" label={leftLabel} onExpand={toggleLeft} footer={leftFooterCompact} />
+        {hideLeft ? null : leftOut ? (
+          <Rail
+            side="left"
+            label={leftLabel}
+            onExpand={() => dockArea("prompt")}
+            tip={t("float.dock", { name: leftLabel })}
+            icon={Icon.popOut}
+          />
         ) : (
-          <>
-            <section
-              style={{
-                width: leftWidth,
-                flexShrink: 0,
-                minWidth: 0,
-                display: "flex",
-                flexDirection: "column",
-                background: "var(--bg)",
-                borderRight: "1px solid var(--line)",
-              }}
-            >
-              <PanelHeader
-                side="left"
-                title={leftLabel}
-                onCollapse={toggleLeft}
-                extra={leftHeaderRight}
-              />
-              {/* ★푸터는 스크롤 **밖**이다 — 안에 있으면 프롬프트를 내릴 때 생성 버튼이
-                  같이 밀려 올라간다 (페로픽스파이 `params-footer` 와 같은 자리) */}
-              <div
-                style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column" }}
-              >
-                {left}
-              </div>
-              {leftFooter}
-            </section>
-            {/* ★서랍은 패널을 **덮지 않는다** — 덮으면 끌어다 놓을 자리가 가려진다 */}
-            {leftDrawer}
-            <ResizeHandle
-              width={leftWidth}
-              setWidth={setLeftWidth}
-              onCommit={commitLayout}
-              min={300}
-              max={640}
-              side="left"
-            />
-          </>
+          <SideColumn
+            side="left"
+            label={leftLabel}
+            width={leftWidth}
+            setWidth={setLeftWidth}
+            onCommit={commitLayout}
+            collapsed={leftCollapsed}
+            onToggle={toggleLeft}
+            headerRight={leftHeaderRight}
+            footer={leftFooter}
+            footerCompact={leftFooterCompact}
+            drawer={leftDrawer}
+          >
+            {left}
+          </SideColumn>
         )}
 
         {/* ★`position: relative` — 번역 창(`TranslatePanel`)이 이 칸의 왼쪽 위, 곧 왼쪽 패널
@@ -199,35 +204,18 @@ export function Shell({
           {centerKeep}
         </div>
 
-        {hideRight ? null : rightCollapsed ? (
-          <Rail side="right" label={rightLabel} onExpand={toggleRight} />
-        ) : (
-          <>
-            <ResizeHandle
-              width={rightWidth}
-              setWidth={setRightWidth}
-              onCommit={commitLayout}
-              min={220}
-              max={420}
-              side="right"
-            />
-            <section
-              style={{
-                width: rightWidth,
-                flexShrink: 0,
-                minWidth: 0,
-                display: "flex",
-                flexDirection: "column",
-                background: "var(--bg)",
-                /* ★끌고 있을 때의 강조는 **덱 줄 자신**이 한다 (`DeckPanel` 의 ★주) —
-                   어둠 위로 올라와 밝게 남는 방식이라 여기서 테두리를 그리지 않는다 */
-                borderLeft: "1px solid var(--line)",
-              }}
-            >
-              <PanelHeader side="right" title={rightLabel} onCollapse={toggleRight} />
-              <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>{right}</div>
-            </section>
-          </>
+        {hideRight ? null : (
+          <SideColumn
+            side="right"
+            label={rightLabel}
+            width={rightWidth}
+            setWidth={setRightWidth}
+            onCommit={commitLayout}
+            collapsed={rightCollapsed}
+            onToggle={toggleRight}
+          >
+            {right}
+          </SideColumn>
         )}
           </main>
         </div>
@@ -237,6 +225,88 @@ export function Shell({
     </div>
   );
 }
+
+/** 좌우 칸 하나 — 머리 · 내용 · 폭 손잡이, 접으면 레일. 메인과 앱 밖 창(갤러리)이 같은 것을 쓴다 */
+export function SideColumn({
+  side,
+  label,
+  width,
+  setWidth,
+  onCommit,
+  collapsed,
+  onToggle,
+  headerRight,
+  footer,
+  footerCompact,
+  drawer,
+  children,
+}: {
+  side: "left" | "right";
+  label: string;
+  width: number;
+  setWidth: (w: number) => void;
+  onCommit: () => void;
+  collapsed: boolean;
+  onToggle: () => void;
+  headerRight?: ReactNode;
+  footer?: ReactNode;
+  footerCompact?: ReactNode;
+  drawer?: ReactNode;
+  children: ReactNode;
+}) {
+  if (collapsed) return <Rail side={side} label={label} onExpand={onToggle} footer={footerCompact} />;
+  const left = side === "left";
+  const handle = (
+    <ResizeHandle width={width} setWidth={setWidth} onCommit={onCommit} min={left ? 300 : 220} max={left ? 640 : 420} side={side} />
+  );
+  const section = (
+    <section
+      style={{
+        width,
+        flexShrink: 0,
+        minWidth: 0,
+        display: "flex",
+        flexDirection: "column",
+        background: "var(--bg)",
+        /* ★끌고 있을 때의 강조는 **덱 줄 자신**이 한다 (`DeckPanel` 의 ★주) —
+           어둠 위로 올라와 밝게 남는 방식이라 여기서 테두리를 그리지 않는다 */
+        [left ? "borderRight" : "borderLeft"]: "1px solid var(--line)",
+      }}
+    >
+      <PanelHeader side={side} title={label} onCollapse={onToggle} extra={headerRight} />
+      {/* ★푸터는 스크롤 **밖**이다 — 안에 있으면 프롬프트를 내릴 때 생성 버튼이
+          같이 밀려 올라간다 (페로픽스파이 `params-footer` 와 같은 자리) */}
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", ...(left ? { display: "flex", flexDirection: "column" } : null) }}>
+        {children}
+      </div>
+      {footer}
+    </section>
+  );
+  return left ? (
+    <>
+      {section}
+      {/* ★서랍은 패널을 **덮지 않는다** — 덮으면 끌어다 놓을 자리가 가려진다 */}
+      {drawer}
+      {handle}
+    </>
+  ) : (
+    <>
+      {handle}
+      {section}
+    </>
+  );
+}
+
+/** 패널 머리에 얹는 작은 버튼 — 접기 버튼과 같은 크기다 */
+export const headBtn: React.CSSProperties = {
+  width: 32,
+  height: 32,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  color: "var(--ink-dim)",
+  flexShrink: 0,
+};
 
 /** 패널 머리 — ★접기 버튼은 **안쪽(가운데 쪽) 가장자리**에 둔다 (사용자 지시 2026-08-04).
  *  바깥 끝(앱의 좌우 끝)에 두면 창 조작 버튼처럼 보여 무엇을 접는 것인지 헷갈린다.
