@@ -88,8 +88,11 @@ type Persisted = {
   /** 씬 칸 한 변의 길이(px). ★3단 고정이 아니라 **연속값**이다 (사용자 지시 2026-08-14).
    *  Ctrl+휠로 조절하고, 한 번에 12% 씩 움직인다. */
   laneSize: number;
-  /** 씬 줄 머리의 폭(px). 경계를 끌어 바꾼다 */
-  laneHeadW: number;
+  /** ★가로 모드에서 씬 **줄마다의 폭**(px) — 열쇠는 넣을 곳(`base`·`#1`…·`all`, `lib/sceneLines`). 열 머리나 칸의 오른쪽 경계를 끌어 바꾼다.
+   *  넣을 곳으로 묶으므로 카드가 달라도 같은 줄은 같은 폭이다. 없으면 기본값 (`laneLineWidth`) */
+  laneLineW: Record<string, number>;
+  /** ★씬의 **프롬프트를 접었나** (사용자 지시 2026-11-11) — 접으면 씬 이름과 그림만 남는다. 씬 영역 전체에 하나다 */
+  lanePromptFold: boolean;
   /** 씬 칸 높이 — 사용자가 손잡이로 정한다 */
   laneHeight: number;
   /** 갤러리 좌 패널에서 **작가 필터가 쓰는 높이**(px). 폴더 목록과의 경계를 끌어 바꾼다.
@@ -222,10 +225,10 @@ type Persisted = {
    *  `right` 는 **세로 모드** — 큰 그림과 씬을 가운데에서 좌우로 양분한다. 세로로 긴 그림을
    *  뽑을 때 아래에 줄이 누우면 그림이 그만큼 작아지는데, 옆으로 보내면 높이를 다 쓴다. */
   laneSide: "bottom" | "right";
-  /** 세로 모드에서 **씬 머리의 높이** — 아래 모드의 `laneHeadW`(폭)에 해당한다.
-   *  ★값을 같이 쓰지 않는다: 폭과 높이는 다른 것이라, 한 모드에서 끌면 다른 모드가
-   *    엉뚱하게 두꺼워진다 (한 창구가 두 가지를 뜻하게 된다). */
-  laneHeadH: number;
+  /** 세로 모드에서 **씬 기둥의 폭** — 머리 오른쪽 가장자리를 끌어 넓힌다 (사용자 지시 2026-11-10: 아래가 아니라 옆으로).
+   *  기둥은 썸네일보다 좁아지지 않는다 (0 이면 썸네일 폭 그대로). ★아래 모드의 줄 폭(`laneLineW`)과 값을 같이 쓰지 않는다.
+   *  ★예전에는 세로 모드의 머리 **높이**(`laneHeadH`)를 끌었다. 그 값은 이제 읽지 않는다 (높이는 줄 수가 정한다, `SceneCells` 의 `LINE_H`) */
+  laneColW: number;
   /** ★★**작업 상태** — 화면을 어떻게 펴 두었나 (사용자 지시 2026-08-22).
    *
    *  새로고침해도, 탭을 옮겨도 **그대로 남는다.** 예전에는 카테고리 접힘이 모듈 변수에만
@@ -267,7 +270,8 @@ const DEFAULTS: Persisted = {
   rightCollapsed: folds(false),
   cols: 4,
   laneSize: 96,
-  laneHeadW: 286,
+  laneLineW: {},
+  lanePromptFold: false,
   laneHeight: 302,
   artistH: 240,
   artistOpen: false,
@@ -305,7 +309,7 @@ const DEFAULTS: Persisted = {
   editorBg: "dark",
   laneSide: "bottom",
   laneWidth: 420,
-  laneHeadH: 132,
+  laneColW: 0,
   view: { cat: {}, fold: {}, tab: {}, hide: {}, frame: {}, pan: {} },
 };
 
@@ -354,7 +358,8 @@ type S = Persisted & {
   positioning: boolean;
   setPositioning: (v: boolean) => void;
   setLaneSize: (n: number) => void;
-  setLaneHeadW: (n: number) => void;
+  setLaneLineW: (dest: string, n: number) => void;
+  setLanePromptFold: (v: boolean) => void;
   setLaneHeight: (n: number) => void;
   setArtistH: (n: number) => void;
   /** 작가의 색을 **다음 색으로 돌린다** — 블록 머리의 색 점과 같은 조작이다 */
@@ -395,7 +400,7 @@ type S = Persisted & {
   /** 그 방향에서 마지막에 고른 크기를 적어 둔다 */
   setSizeLast: (dir: "landscape" | "portrait" | "square", wh: [number, number]) => void;
   setLaneSide: (v: "bottom" | "right") => void;
-  setLaneHeadH: (n: number) => void;
+  setLaneColW: (n: number) => void;
   /** 작업 상태 한 칸을 적어 둔다 (`view` 주석) */
   setView: <K extends keyof S["view"]>(kind: K, id: string, v: S["view"][K][string]) => void;
   setLaneWidth: (n: number) => void;
@@ -444,7 +449,8 @@ type S = Persisted & {
 export const LANE_MIN = 40;
 export const LANE_MAX = 256;
 /** 씬 줄 머리(그 씬의 프롬프트) 폭의 한계 */
-export const HEAD_MIN = 150;
+/** 씬 줄 폭의 하한 (가로 모드) */
+export const LINE_MIN = 90;
 export const HEAD_MAX = 560;
 
 export const useUi = create<S>((set, get) => ({
@@ -466,7 +472,11 @@ export const useUi = create<S>((set, get) => ({
   positioning: false,
   setPositioning: (v) => set({ positioning: v }),
   setLaneSize: (n) => set({ laneSize: Math.min(LANE_MAX, Math.max(LANE_MIN, Math.round(n))) }),
-  setLaneHeadW: (n) => set({ laneHeadW: Math.min(HEAD_MAX, Math.max(HEAD_MIN, Math.round(n))) }),
+  setLaneLineW: (dest, n) => set({ laneLineW: { ...get().laneLineW, [dest]: Math.min(HEAD_MAX, Math.max(LINE_MIN, Math.round(n))) } }),
+  setLanePromptFold: (v) => {
+    set({ lanePromptFold: v });
+    get().commitLayout();
+  },
   setLaneHeight: (n) => set({ laneHeight: Math.max(84, Math.round(n)) }),
   // ★아래로는 머리 한 줄, 위로는 패널을 다 먹지 않을 만큼만
   setArtistH: (n) => set({ artistH: Math.min(720, Math.max(96, Math.round(n))) }),
@@ -494,8 +504,8 @@ export const useUi = create<S>((set, get) => ({
    *  머리가 좁아지면 글이 줄바꿈으로 접히고, 그래도 모자라면 잘린다 — 큰 그림을 넓게 쓰려고
    *  줄이는 것이라 여기서 막지 않는다. */
   setLaneWidth: (n) => set({ laneWidth: Math.max(96, Math.round(n)) }),
-  // 세로 모드의 머리 높이 — 프롬프트 칩 한두 줄이 들어갈 만큼은 있어야 한다
-  setLaneHeadH: (n) => set({ laneHeadH: Math.min(420, Math.max(72, Math.round(n))) }),
+  // 세로 모드의 씬 기둥 폭 — 줄 폭과 같은 상한까지
+  setLaneColW: (n) => set({ laneColW: Math.min(HEAD_MAX, Math.max(0, Math.round(n))) }),
   setView: (kind, id, v) => {
     const cur = get().view;
     if (cur[kind][id] === v) return;   // 같은 값이면 저장을 안 부른다
@@ -684,11 +694,11 @@ export const useUi = create<S>((set, get) => ({
     // ★★레이아웃만이 아니라 **저장해야 하는 것 전부**를 적는다. 예전에는 목록에서
     //   `notifyDone`·`perSlot`·`curated` 가 빠져 있어, 켜 놓아도 껐다 켜면 기본값으로
     //   돌아갔다 (감사 2026-08-16). 필드를 늘리면 **여기에도 더할 것.**
-    const { leftWidth, rightWidth, leftCollapsed, rightCollapsed, cols, laneSize, laneHeadW,
+    const { leftWidth, rightWidth, leftCollapsed, rightCollapsed, cols, laneSize, laneLineW, lanePromptFold,
       laneHeight, artistH, artistOpen, artistColor, artistAlways, font, textScale, importPick, aiWidth, aiCollapsed,
       notifyDone, notifySound, notifyVolume, perSlot, curated, agentAuto, agentAskHard,
       tagSuggest, artistPrefix, weightHl, fmView, streamPreview, focusNewPending, enhanceLast, maskBrush, convertLast, editLast, editorBrush, editorText,
-      editorBubble, editorSfx, editorBg, sizeLast, laneSide, laneWidth, laneHeadH, view } = get();
+      editorBubble, editorSfx, editorBg, sizeLast, laneSide, laneWidth, laneColW, view } = get();
     try {
       localStorage.setItem(
         KEY,
@@ -699,7 +709,8 @@ export const useUi = create<S>((set, get) => ({
           rightCollapsed,
           cols,
           laneSize,
-          laneHeadW,
+          laneLineW,
+          lanePromptFold,
           laneHeight,
           artistH,
           artistOpen,
@@ -735,7 +746,7 @@ export const useUi = create<S>((set, get) => ({
           sizeLast,
           laneSide,
           laneWidth,
-          laneHeadH,
+          laneColW,
           view,
         }),
       );
@@ -790,3 +801,6 @@ export const flashStyle = (on: boolean): React.CSSProperties =>
         transition: "outline-color 0.2s, background 0.2s",
       }
     : {};
+
+/** 가로 모드에서 그 줄의 폭 — 사용자가 끈 값, 없으면 기본값 (첫 줄이 베이스면 조금 넓다) */
+export const laneLineWidth = (w: Record<string, number>, dest: string): number => w[dest] ?? (dest === "base" ? 200 : 170);

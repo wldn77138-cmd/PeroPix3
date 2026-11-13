@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { compileBlocks } from "../lib/blocks";
+import { joinCell, placeScene } from "../lib/sceneLines";
 import { backendUrl } from "../lib/backend";
 import { compilePrompt, usePrompt } from "./prompt";
 import { allCells, allScenes, onBeforeWsSwitch, useWs, type SceneGroup } from "./workspace";
@@ -318,42 +318,20 @@ export async function queueGroup(src: GenSource): Promise<{ queued: number } | {
     // ★**바퀴를 여기서 편다** (2026-08-11). 예전에는 씬 목록만 보내고 장 수는 서버가
     //   펼쳤는데(`qb.count`), 그러면 "한 바퀴에 시드 하나"를 표현할 수가 없다.
     //   여기서 펴면 순서와 시드가 둘 다 정확해진다.
-    rounds(Math.max(1, useUi.getState().perSlot), params, live, ({ cell: c }, seed) => {
-      // ★씬 프롬프트가 **payload 의 어디로** 들어가나 — 탭의 선택 하나가 정한다.
-      //   `base` 면 top-level prompt 에, 캐릭터 id 면 그 사람의 `characterPrompts[]` 에 붙는다.
-      //   ★고른 캐릭터가 목록에 없으면(꺼짐·삭제) base 로 떨어진다 — 조용히 사라지지 않게.
-      const scene = compileBlocks(c.blocks);
-      // ★목적지는 **셋**이다 — base · 캐릭터 한 명 · **캐릭터 전원**(`"all"`).
-      //   「전원」은 v2 의 `promptTarget === "char"` 이다 (`backend.py:2803-2833`): 그쪽은
-      //   씬 태그를 **켜진 캐릭터 전부**의 프롬프트에 이어 붙였다.
-      //   ★켜진 캐릭터가 **둘 이상일 때만** 뜻이 있다 (한 명이면 그 사람을 고르는 것과 같다) —
-      //     화면도 그때만 선택지를 낸다(`SceneLane`). 조건이 깨지면 base 로 떨어진다.
-      //   ★순차 모드에서는 그 장에 **한 명뿐**이라 「전원」이 곧 그 사람이다.
-      const dest =
-        tab.sceneDest === "all" && (party.length > 1 || seq)
-          ? "all"
-          : party.some((ch) => ch.id === tab.sceneDest)
-            ? tab.sceneDest
-            : "base";
-      const toChar = dest !== "base";
+    rounds(Math.max(1, useUi.getState().perSlot), params, live, ({ card, cell: c }, seed) => {
+      /* ★★씬 프롬프트가 **payload 의 어디로** 들어가나 — 카드의 **줄마다** 정한다 (`lib/sceneLines`, 사용자 결정 2026-11-11).
+         베이스면 top-level prompt 에, 캐릭터 번호면 켜진 캐릭터 중 n번째 사람의 `characterPrompts[]` 에, 「전원」이면 켜진 사람 모두에 붙는다.
+         ★가리킨 사람이 이 장에 없으면 첫 줄은 베이스로 떨어지고(조용히 사라지지 않게) 나머지 줄은 안 들어간다.
+         ★「전원」은 v2 의 `promptTarget === "char"` 다 (`backend.py:2803-2833`).
+         ★번호는 **탭의 켜진 캐릭터 차례**로 센다 (`raw.chars`). 순차 생성에서 n번째 사람의 그림에는 「캐릭터 n」 줄과 「전원」 줄만 들어간다 (사용자 결정 2026-11-11). */
+      const lined = joinCell(card, c);
+      const placed = placeScene(lined, raw.prompt, party, raw.chars);
       // ★★**이 장의 추첨**이다. 회차마다·씬마다 따로 뽑히며, 이 한 줄이 와일드카드의
       //   존재 이유다 (`docs/v2-feature-catalog.md:477`: 한 번만 풀면 전 이미지가 굳는다).
       //   ★푸는 것은 **이어 붙인 뒤**다. `#이름` 은 나타날 때마다 따로 뽑히므로 결과가 같고,
       //     접두·캐릭터·씬을 따로 풀던 v2 보다 자리가 하나로 모인다.
-      const shot = resolveShot(pools, {
-        // 베이스 + 이 씬의 블록들 순서로 잇는다.
-        // ★씬도 블록이라 **켜진 블록만** 들어간다 — 프롬프트 쪽과 같은 규칙이다
-        // ★카드 공통 접두는 걷었다 (2026-08-21) — 같은 것을 붙이려면 베이스 블록을 쓴다
-        prompt: [raw.prompt, toChar ? "" : scene].filter(Boolean).join(", "),
-        uc: raw.uc,
-        chars: toChar
-          ? party.map((ch) =>
-              (dest === "all" || ch.id === dest) && scene
-                ? { ...ch, prompt: [ch.prompt, scene].filter(Boolean).join(", ") }
-                : ch,
-            )
-          : party,
-      });
+      // ★씬도 블록이라 **켜진 블록만** 들어간다 — 프롬프트 쪽과 같은 규칙이다
+      const shot = resolveShot(pools, { prompt: placed.prompt, uc: raw.uc, chars: placed.chars });
       return {
         cell: c.name,
         cell_id: c.id,
@@ -372,8 +350,8 @@ export async function queueGroup(src: GenSource): Promise<{ queued: number } | {
         //     그림 바이트는 안 담는다 — 구조뿐이라 작다.
         env: {
           prompt: src.prompt,
-          sceneDest: tab.sceneDest,
-          cell: { name: c.name, blocks: c.blocks },
+          // ★씬은 카드의 줄과 합친 모양으로 남긴다 (`joinCell`) — 그림 한 장에는 그 씬 하나만 남기 때문이다
+          cell: { name: c.name, ...lined },
         },
       };
     }),
