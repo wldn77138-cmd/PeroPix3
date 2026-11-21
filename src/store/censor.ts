@@ -4,7 +4,7 @@ import { api, backendUrl } from "../lib/backend";
 import { toast } from "./toast";
 import { CensorRenderer, type CoverSettings, type Scene } from "../lib/censorRender.ts";
 import {
-  burnBoxes, clearMask, emptyRect, floodErase, isEmpty, makeMask, methodIndex, remap, restore, snapshot, stamp, stroke,
+  burnBoxes, clearMask, emptyRect, floodErase, floodPaint, floodPaintColor, isEmpty, makeMask, methodIndex, remap, restore, snapshot, stamp, stroke,
   toRenderBoxes, type Mask, type Patch, type Rect, type Shape,
 } from "../lib/censorMask.ts";
 import { fileMgrImg } from "../lib/imgUrl";
@@ -64,7 +64,7 @@ export type Tab = "before" | "processing" | "after";
  *  편집 대상이 박스 목록이 아니라 **칠한 칸의 격자**(`lib/censorMask`)가 되었기 때문이다.
  *  ★`pan` 은 그리지 않는다 — **확대한 그림을 끌어 옮기는** 도구다 (사용자 결정 2026-09-20).
  *    생성 쪽은 그냥 끌기로 옮기지만 여기서는 끌기가 이미 붓질이라, 도구를 골라서 가른다. */
-export type Tool = "brush" | "erase" | "pan";
+export type Tool = "brush" | "erase" | "pan" | "fill";
 /** 붓 지름의 천장 (px). 슬라이더와 Alt+휠이 같은 값을 본다 */
 export const BRUSH_MAX = 300;
 
@@ -104,6 +104,10 @@ type Saved = {
   brushPx: number;
   /** 붓 모양 — 사각·원 (사용자 지시 2026-09-05: *"원형·사각 다 있는 게 좋을 듯. 네모가 기본"*) */
   brushShape: Shape;
+  /** 페인트통이 **그림 색으로** 채우나 (`floodPaintColor`). 끄면 칠한 테두리 안의 빈 곳을 채운다 (`floodPaint`) */
+  fillByColor: boolean;
+  /** 그림 색으로 채울 때의 허용치 — 채널마다의 차이 상한 0~255 (이미지 편집의 페인트통과 같은 뜻) */
+  fillTol: number;
   dest: string;
   /** 저장 자리 — **일괄변환과 같은 세 갈래** (사용자 지시 2026-09-04).
    *  `overwrite` 원본 자리에 · `sub` 첫 그림 아래 `output/` · `folder` 고른 폴더. */
@@ -139,6 +143,10 @@ const DEFAULTS: Saved = {
   // 40px. 젖꼭지 하나를 한두 번에 덮는 크기
   brushPx: 40,
   brushShape: "square",
+  fillByColor: false,
+  /* ★골든 그림 30곳 × 9자리에서 재 본 값 (2026-11-19). 경계가 부드러운 그림은 누른 자리가 1px 만 달라도
+     유륜에서 가슴 전체로 번진다 — 상자 밖으로 샌 클릭이 16: 11% · 24: 30% · 32: 45%. 덜 새는 쪽을 기본으로 */
+  fillTol: 24,
   dest: "",
   // ★기본은 일괄변환과 같은 `sub` — 원본을 건드리지 않는 쪽이 기본이어야 한다
   destMode: "sub",
@@ -325,6 +333,8 @@ type S = Saved & {
   strokeEnd: () => void;
   /** 그 자리와 이어진 덩어리를 통째로 지운다 (우클릭). 한 걸음으로 되돌린다 */
   eraseBlob: (at: { x: number; y: number }) => void;
+  /** 페인트통 — 누른 자리와 이어진 빈 곳을 지금 방식으로 채운다 (`floodPaint`). 한 번이 한 걸음이다 */
+  fillAt: (at: { x: number; y: number }) => void;
   undoPaint: () => void;
   clearPaint: () => void;
   /** 검열 방식을 바꾼다 — ★**검열 중·후에는 칠한 칸 전부**에 건다 */
@@ -839,6 +849,20 @@ export const useCensor = create<S>((set, get) => ({
     s.strokeEnd();
   },
 
+  fillAt(at) {
+    const s = get();
+    const m = s.curMask();
+    if (!m || m.cells[at.y * m.w + at.x]) return;
+    // ★그림 색으로 채우려면 그림이 다 들어와 있어야 한다 — 아직이면 아무것도 안 한다 (빈 곳 채우기로 바꿔 하지 않는다)
+    const px = s.fillByColor ? s.renderer?.pixels() ?? null : null;
+    if (s.fillByColor && (!px || px.length !== m.w * m.h * 4)) return;
+    s.strokeBegin();
+    const v = methodIndex(s.method), dirty = get().strokeDirty ?? undefined;
+    if (px) floodPaintColor(m, px, at.x, at.y, s.fillTol, v, dirty);
+    else floodPaint(m, at.x, at.y, v, dirty);
+    s.strokeEnd();
+  },
+
   undoPaint() {
     const s = get();
     const m = s.curMask();
@@ -922,12 +946,12 @@ function fillConf(cur: Record<string, number>, classes: string[], base: number) 
 
 function save(s: Saved) {
   const { model, targets, labelConf, conf, floor, method, color, expand, feather, mosaic,
-    mosaicOpacity, blur, steamBright, steamAlpha, steamFade, peek, brushPx, brushShape, dest, destMode, view } = s;
+    mosaicOpacity, blur, steamBright, steamAlpha, steamFade, peek, brushPx, brushShape, fillByColor, fillTol, dest, destMode, view } = s;
   // ★지금 방식의 값을 보관함에도 넣어 적는다 — 다음에 열 때 방식마다 제 값으로 시작한다
   const methodOpts = { ...s.methodOpts, [method]: { expand, feather, peek } };
   try {
     localStorage.setItem(KEY, JSON.stringify({ model, targets, labelConf, conf, floor, method,
-      color, expand, feather, mosaic, mosaicOpacity, blur, steamBright, steamAlpha, steamFade, peek, brushPx, brushShape, dest, destMode, methodOpts, view }));
+      color, expand, feather, mosaic, mosaicOpacity, blur, steamBright, steamAlpha, steamFade, peek, brushPx, brushShape, fillByColor, fillTol, dest, destMode, methodOpts, view }));
   } catch {}
 }
 

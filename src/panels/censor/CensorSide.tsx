@@ -150,7 +150,8 @@ export function CensorSide() {
               확대한 그림을 끌어 옮기는 도구라, 읽기 전용인 검열 전 탭에서도 필요하다.
               그리는 도구 둘은 아래에서 `editable` 일 때만 낸다. */}
           {/* ★칸 수는 실제로 내는 도구 수에 맞춘다 — 2열에 셋을 넣으면 마지막 하나가 반쪽으로 남는다 */}
-          <div style={{ display: "grid", gridTemplateColumns: editable ? "1fr 1fr 1fr" : "1fr", gap: "var(--sp-2)" }}>
+          {/* ★넷이면 두 줄로 — 한 줄에 넷은 이름이 잘린다 */}
+          <div style={{ display: "grid", gridTemplateColumns: editable ? "1fr 1fr" : "1fr", gap: "var(--sp-2)" }}>
             {(editable ? TOOLS : TOOLS.filter(([id]) => id === "pan")).map(([id, key, icon]) => (
               <button
                 key={id}
@@ -175,6 +176,30 @@ export function CensorSide() {
           </div>
           <ViewLine />
         </Sec>
+
+        {/* ★페인트통을 골랐을 때만 — 무엇으로 채울지와 허용치 (사용자 결정 2026-11-19) */}
+        {editable && c.tool === "fill" && (
+          <Sec label={t("censor.toolFill")} help={t("censor.fillHint")}>
+            <label
+              style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)", fontSize: "var(--text-2xs)", color: "var(--ink-soft)", cursor: "pointer" }}
+            >
+              <input
+                type="checkbox"
+                data-censor-fill-color
+                checked={c.fillByColor}
+                onChange={(e) => c.tune({ fillByColor: e.target.checked })}
+              />
+              {t("censor.fillByColor")}
+            </label>
+            {c.fillByColor && (
+              <Line label={t("editor.tolerance")}>
+                <input type="range" data-censor-fill-tol min={0} max={255} value={c.fillTol}
+                  onChange={(e) => c.tune({ fillTol: Number(e.target.value) })} style={{ flex: 1 }} />
+                <span style={num}>{c.fillTol}</span>
+              </Line>
+            )}
+          </Sec>
+        )}
 
         {editable && (
           <>
@@ -343,8 +368,8 @@ export function CensorSide() {
           <Sec label={t("censor.keys")}>
             <div style={{ display: "flex", flexDirection: "column", gap: "var(--sp-1)" }}>
               {[
-                // ★도구는 셋이다 (`3` 은 검열 전 탭에서도 먹는다 — `panels/Censor.tsx`)
-                ["1 2 3", t("censor.k_tool")],
+                // ★도구는 넷이다 (`3` 은 검열 전 탭에서도 먹는다 — `panels/Censor.tsx`)
+                ["1 2 3 4", t("censor.k_tool")],
                 [`Ctrl+${t("censor.k_wheelKey")}`, t("censor.k_zoom")],
                 [`Alt+${t("censor.k_wheelKey")}`, t("censor.k_size")],
                 ["Ctrl+Z", t("censor.k_undo")],
@@ -430,11 +455,13 @@ const METHODS = [
 ] as const;
 
 // ★문구는 인페인트 마스크의 것을 그대로 쓴다 — 같은 뜻에 다른 말을 두지 않는다
-const TOOLS: [Tool, "imgIn.brush" | "imgIn.eraser" | "censor.toolPan", "brush" | "eraser" | "move"][] = [
+const TOOLS: [Tool, "imgIn.brush" | "imgIn.eraser" | "censor.toolPan" | "censor.toolFill", "brush" | "eraser" | "move" | "bucket"][] = [
   ["brush", "imgIn.brush", "brush"],
   ["erase", "imgIn.eraser", "eraser"],
   // ★그리지 않는 도구다 — 확대한 그림을 끌어 옮긴다. 아이콘도 커서와 같은 십자 화살표다
   ["pan", "censor.toolPan", "move"],
+  // ★페인트통은 넷째다 — 단축키 `1 2 3` 의 자리를 그대로 두려고 뒤에 붙인다. 아이콘은 이미지 편집의 페인트통과 같다
+  ["fill", "censor.toolFill", "bucket"],
 ];
 
 /** 얼마로 볼까 — **생성 쪽 큰 그림과 같은 줄**이다 (`panels/Canvas.tsx` 의 보기 단추).

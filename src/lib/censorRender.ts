@@ -15,7 +15,7 @@
  *
  *  박스를 끄는 동안 일어나는 일은 `drawImage` 몇 번과 경로 채우기 하나뿐이다.
  */
-import { cloudScale, fadeStartOf, plateRGBA, prepRegion, regionCoverRows, regionReach } from "./steam.ts";
+import { fadeStartOf, haloReach, plateRGBA, prepRegion, regionCoverRows } from "./steam.ts";
 import { makeNoise } from "./noise.ts";
 import { methodIndex, rectEmpty, type Mask, type Rect } from "./censorMask.ts";
 import { drawBlurred } from "./canvasFilter.ts";
@@ -179,11 +179,25 @@ export class CensorRenderer {
   private alphaCvs = new Map<string, { cv: HTMLCanvasElement; mask: Mask | null; rev: number }>();
   private padCv: HTMLCanvasElement | null = null;
   private cutCv: HTMLCanvasElement | null = null;
+  /** 원본 크기의 RGBA (`pixels`) — 처음 부를 때 한 번 그려 들고 있다 */
+  private rgba: Uint8ClampedArray | null = null;
 
   constructor(src: Src, w?: number, h?: number) {
     this.src = src;
     this.w = w ?? src.width;
     this.h = h ?? src.height;
+  }
+
+  /** 그림 원본 크기의 RGBA — 페인트통의 「그림 색으로 채우기」가 읽는다 (`censorMask.floodPaintColor`).
+   *  ★바탕은 `blob:` 주소의 그림이라 캔버스가 오염되지 않는다 (`store/censor.resolveSrc` 의 ★★주) */
+  pixels(): Uint8ClampedArray {
+    if (!this.rgba) {
+      const cv = c2d(this.w, this.h);
+      const g = cv.getContext("2d", { willReadFrequently: true })!;
+      g.drawImage(this.src, 0, 0, this.w, this.h);
+      this.rgba = g.getImageData(0, 0, cv.width, cv.height).data;
+    }
+    return this.rgba;
   }
 
   /** 설정이 바뀌면 재료를 버린다. ★모양만 바뀔 때는 **부르지 않는다** — 그게 빠른 이유다 */
@@ -601,12 +615,8 @@ export class CensorRenderer {
     const ex = Math.max(0, s.expand) * scale;
     const boxes = gItems.map((it) => [it.cx - it.w / 2 + ex, it.cy - it.h / 2 + ex, it.cx + it.w / 2 - ex, it.cy + it.h / 2 - ex]);
     const rb = bboxOf(boxes);
-    // 굵기를 먼저 대략 재어 격자 여유를 잡는다 — 조각 짧은 변의 최대의 반 (거리장으로 다시 잰다)
-    let half = 0;
-    for (const b of boxes) half = Math.max(half, Math.min(b[2] - b[0], b[3] - b[1]) / 2);
-    half = Math.max(1, half);
-    const k0 = cloudScale((2 * half) / scale);
-    const pad = Math.ceil(regionReach(half, k0, ex));
+    // 격자 여유 — 경계 밖 자락은 굵기와 상관없이 하나다 (`steam.HALO_R`)
+    const pad = Math.ceil(haloReach(scale, ex));
     const x0 = rb.x0 - pad, y0 = rb.y0 - pad, W = rb.W + pad * 2, H = rb.H + pad * 2;
     const long = Math.max(W, H);
     const kg = Math.min(1, (quick ? STEAM_WORK_QUICK : STEAM_WORK) / long);
