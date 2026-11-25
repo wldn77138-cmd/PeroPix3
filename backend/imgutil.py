@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import base64
 import io
-import json
+import math
 
-from PIL import Image, ImageChops, ImageDraw, ImageFilter
+from PIL import Image, ImageChops, ImageFilter
 
 
 def ensure_png_base64(b64: str, force_reencode: bool = False) -> str:
@@ -82,6 +82,124 @@ def preprocess_base_image(b64_image: str, width: int, height: int) -> str:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+#: V5 Precise Reference 판 — 공홈 번들 `b2fe159` 의 표 그대로다 (`[w, h]`, 전부 1MP 안팎 · 64 배수)
+REF_BUCKETS: list[tuple[int, int]] = [
+    (256, 4096), (256, 4032), (256, 3968), (256, 3904), (256, 3840), (256, 3776), (256, 3712), (256, 3648),
+    (256, 3584), (256, 3520), (256, 3456), (256, 3392), (256, 3328), (320, 3264), (320, 3200), (320, 3136),
+    (320, 3072), (320, 3008), (320, 2944), (320, 2880), (320, 2816), (320, 2752), (384, 2688), (384, 2624),
+    (384, 2560), (384, 2496), (384, 2432), (384, 2368), (448, 2304), (448, 2240), (448, 2176), (448, 2112),
+    (512, 2048), (512, 1984), (512, 1920), (512, 1856), (576, 1792), (576, 1728), (576, 1664), (640, 1600),
+    (640, 1536), (704, 1472), (704, 1408), (768, 1344), (768, 1280), (832, 1216), (896, 1152), (960, 1088),
+    (1024, 1024), (1088, 960), (1152, 896), (1216, 832), (1280, 768), (1344, 768), (1408, 704), (1472, 704),
+    (1536, 640), (1600, 640), (1664, 576), (1728, 576), (1792, 576), (1856, 512), (1920, 512), (1984, 512),
+    (2048, 512), (2112, 448), (2176, 448), (2240, 448), (2304, 448), (2368, 384), (2432, 384), (2496, 384),
+    (2560, 384), (2624, 384), (2688, 384), (2752, 320), (2816, 320), (2880, 320), (2944, 320), (3008, 320),
+    (3072, 320), (3136, 320), (3200, 320), (3264, 320), (3328, 256), (3392, 256), (3456, 256), (3520, 256),
+    (3584, 256), (3648, 256), (3712, 256), (3776, 256), (3840, 256), (3904, 256), (3968, 256), (4032, 256),
+    (4096, 256),
+]
+
+
+def ref_bucket(w: int, h: int) -> dict:
+    """그 크기의 그림이 갈 판과 덮어 맞출 크기 (공홈 `D.f` 를 그대로 옮겼다).
+
+    ★판은 **로그 비율이 가장 가까운 것**이다. 같으면 앞선 판이 남는다 (`t<n`).
+    ★덮어 맞춘다(cover). 짧은 쪽이 판에 닿게 키우고 넘친 쪽의 가운데를 자른다 — 레터박스가 아니다."""
+    a = math.log(max(w, 1) / max(h, 1))
+    bw, bh = REF_BUCKETS[0]
+    best = abs(a - math.log(bw / bh))
+    for x, y in REF_BUCKETS:
+        d = abs(a - math.log(x / y))
+        if d < best:
+            bw, bh, best = x, y, d
+    n = max(bw / w, bh / h)
+    rw = max(math.floor(w * n + 0.5), bw)
+    rh = max(math.floor(h * n + 0.5), bh)
+    return {"width": bw, "height": bh, "resize": (rw, rh),
+            "left": (rw - bw) // 2, "top": (rh - bh) // 2, "unchanged": (w, h) == (bw, bh)}
+
+
+def _drop_stealth(img: Image.Image) -> Image.Image | None:
+    """NAI 가 알파 LSB 에 심은 메타데이터를 지운 그림. 심긴 것이 없으면 None (공홈 `removeAlphaMetadata`).
+
+    ★공홈은 레퍼런스를 보내기 전에 이것부터 한다 — 알파 254 는 255 로, 1 은 0 으로."""
+    if img.mode != "RGBA":
+        return None
+    import numpy as np
+    from meta import _stealth_bits, _stealth_sig
+
+    px = np.array(img)
+    if not _stealth_sig(_stealth_bits(px[:, :, 3])):
+        return None
+    a = px[:, :, 3]
+    a[a == 254] = 255
+    a[a == 1] = 0
+    return Image.fromarray(px)
+
+
+def _open_ref(b64: str) -> tuple[Image.Image, Image.Image | None]:
+    """레퍼런스 그림을 연다. 둘째 값은 알파 메타데이터를 지운 그림이다 (없었으면 None)."""
+    img = Image.open(io.BytesIO(base64.b64decode(b64)))
+    if img.mode in ("LA", "P", "PA"):
+        img = img.convert("RGBA")
+    elif img.mode not in ("RGB", "RGBA"):
+        img = img.convert("RGB")
+    return img, _drop_stealth(img)
+
+
+def bucket_reference(b64: str) -> str:
+    """V5 Precise Reference 그림을 판에 맞춘다 (공홈 `bucketCharacterReferences` 갈래).
+
+    ★공홈 순서 그대로다: 알파 메타데이터 지우기 → 판 고르기 → **lanczos3** 로 덮어 맞추기 → 가운데 자르기 → PNG.
+      PIL 의 LANCZOS 가 같은 계열이다 (`preprocess_base_image` 와 같은 이유).
+    ★크기가 이미 판과 같으면 다시 굽지 않는다 (NAI 가 내는 832×1216 이 그렇다)."""
+    img, clean = _open_ref(b64)
+    b = ref_bucket(*img.size)
+    if b["unchanged"]:
+        return _png_b64(clean) if clean is not None else b64
+    out = (clean or img).resize(b["resize"], Image.LANCZOS)
+    out = out.crop((b["left"], b["top"], b["left"] + b["width"], b["top"] + b["height"]))
+    return _png_b64(out)
+
+
+#: V4.5 Precise Reference 판 — 공홈 `validDirectorSizes` 그대로다. ★차례가 곧 비율 차가 같을 때의 우선순위다
+REF_CANVASES: list[tuple[int, int]] = [(1024, 1536), (1536, 1024), (1472, 1472)]
+
+
+def _js_round(x: float) -> int:
+    """JS `Math.round` (.5 는 위로). 파이썬 `round` 는 짝수 쪽이라 한 픽셀씩 어긋난다"""
+    return math.floor(x + 0.5)
+
+
+def letterbox_reference(b64: str, transparent: bool = False) -> str:
+    """V4.5 Precise Reference 그림을 세 판 중 하나에 얹는다 (공홈 `resizeCharacterReferences` 갈래).
+
+    ★공홈 순서 그대로다: 알파 메타데이터 지우기 → 판 = 가로세로 비율의 **차가 가장 작은 것**(같으면 앞선 판) →
+      판 안에 들어가게 **lanczos3** 로 줄이기 → 가운데에 얹기 → 남는 곳은 검정 (투명 배경 모델이면 투명) → PNG.
+    ★예전에는 화면이 캔버스로 했다 (v2 `processPreciseReferenceImage`): 판을 가로·세로·정사각으로만 갈라
+      거의 정사각인 세로 그림이 1024×1536 으로 갔고, 줄이는 방식도 달랐다. 공홈은 2026-10 부터 이것이다."""
+    img, clean = _open_ref(b64)
+    img = clean or img
+    w, h = img.size
+    n = w / h
+    s, o = REF_CANVASES[0]
+    for x, y in REF_CANVASES:
+        if abs(x / y - n) < abs(s / o - n):
+            s, o = x, y
+    if n > s / o:
+        c, hh = s, _js_round(s / n)
+    else:
+        c, hh = _js_round(o * n), o
+    f = img if (c, hh) == (w, h) else img.resize((c, hh), Image.LANCZOS)
+    canvas = Image.new("RGBA", (s, o), (0, 0, 0, 0))
+    canvas.alpha_composite(f.convert("RGBA"), (_js_round((s - c) / 2), _js_round((o - hh) / 2)))
+    if transparent:
+        return _png_b64(canvas)
+    bg = Image.new("RGBA", (s, o), (0, 0, 0, 255))
+    bg.alpha_composite(canvas)
+    return _png_b64(bg.convert("RGB"))
 
 
 def blend_mask_8px(b64_mask: str, width: int, height: int) -> Image.Image:
@@ -304,7 +422,7 @@ def size_of_base64(b64: str) -> tuple[int, int]:
         return img.size
 
 
-def preview_jpeg(raw: bytes, quality: int = 85, crop: tuple[float, float, float, float] | None = None) -> bytes:
+def preview_jpeg(raw: bytes, quality: int = 85) -> bytes:
     """**형식만 바꿔 가볍게 한다** — 그리는 중인 중간 그림을 앱으로 흘릴 때 쓴다
     (`server.py` 의 `image_step`, 사용자 지시 2026-08-26).
 
@@ -319,15 +437,10 @@ def preview_jpeg(raw: bytes, quality: int = 85, crop: tuple[float, float, float,
       (실측 1024², b64 기준: JPEG q85 40KB·2ms / WebP q80 12KB·18~97ms). 여기서 아껴야 하는
       것은 **한 프레임에 드는 시간**이라 작은 쪽이 아니라 빠른 쪽을 고른다.
     ★품질을 아끼는 자리다 — **보고 버리는 그림**이라 원본에 손대지 않는다 (완성본은 그대로 PNG).
-    ★`crop` 은 **비율로 적은 자리** `(x0, y0, x1, y1)` 다. 인퍼런스는 결과 칸만 흘린다 (`server._inference_of`).
-      중간 그림의 크기가 요청 크기와 다를 수 있어 픽셀로 받지 않는다.
     """
     with Image.open(io.BytesIO(raw)) as im:
         im.load()
         out = im.convert("RGB")
-    if crop:
-        w, h = out.size
-        out = out.crop((round(crop[0] * w), round(crop[1] * h), round(crop[2] * w), round(crop[3] * h)))
     buf = io.BytesIO()
     out.save(buf, format="JPEG", quality=quality)
     return buf.getvalue()
@@ -337,52 +450,3 @@ def _png_b64(img: Image.Image) -> str:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("utf-8")
-
-
-def inference_canvas(ref_b64: str, canvas: tuple[int, int], ref: tuple[int, int, int, int],
-                     keep: tuple[int, int, int, int]) -> tuple[str, str]:
-    """인퍼런스의 캔버스와 마스크 (설계 `docs/inference-design.md` 4번).
-
-    ★배치는 **화면이 정한 숫자 그대로**다 (`src/lib/inference.ts` 의 `planFor`). 여기서 다시 계산하면
-      요금·결과 크기 표시와 실제가 갈린다.
-    ★흰 바탕에 참조를 `ref` 자리로 줄여 붙이고, `keep`(참조 칸 전체, 옆 여백 포함)만 검게 칠한 마스크를 만든다.
-      흰 곳이 다시 그려진다. 테두리는 두르지 않는다 (두르면 결과에 검은 틀이 따라 그려진다, 6-2).
-    ★투명한 참조는 **흰 바탕에 눕힌다.** 캔버스가 흰 바탕이라 검게 깔리면 칸 경계가 생긴다."""
-    W, H = canvas
-    with Image.open(io.BytesIO(base64.b64decode(ref_b64))) as src:
-        src.load()
-        im = src.convert("RGBA")
-    flat = Image.new("RGB", im.size, "white")
-    flat.paste(im, mask=im.getchannel("A"))
-    x, y, w, h = ref
-    out = Image.new("RGB", (W, H), "white")
-    out.paste(flat.resize((w, h), Image.LANCZOS), (x, y))
-    mask = Image.new("RGB", (W, H), "white")
-    kx, ky, kw, kh = keep
-    ImageDraw.Draw(mask).rectangle([kx, ky, kx + kw - 1, ky + kh - 1], fill="black")
-    return _png_b64(out), _png_b64(mask)
-
-
-def crop_png(png: bytes, x: int, y: int, w: int, h: int) -> bytes:
-    """다 만든 그림에서 한 자리만 잘라 낸다 (인퍼런스의 결과 칸).
-
-    ★tEXt 청크를 물려준다 (`paste_tile` 과 같은 이유). 그리고 NAI 메타데이터(`Comment`)의 `width`·`height` 를
-      **잘라 낸 크기**로 고친다. 그대로 두면 그림과 적힌 크기가 달라 다른 도구가 잘못 읽는다."""
-    with Image.open(io.BytesIO(png)) as im:
-        im.load()
-        info = dict(im.info)
-        out = im.crop((x, y, x + w, y + h))
-        if out.mode not in ("RGB", "RGBA"):
-            out = out.convert("RGB")
-    c = info.get("Comment")
-    if isinstance(c, str):
-        try:
-            d = json.loads(c)
-        except ValueError:
-            d = None
-        if isinstance(d, dict):
-            d["width"], d["height"] = w, h
-            info["Comment"] = json.dumps(d, ensure_ascii=False)
-    buf = io.BytesIO()
-    out.save(buf, format="PNG", pnginfo=_pnginfo_of(info))
-    return buf.getvalue()

@@ -7,8 +7,7 @@ import { Icon } from "../components/Icon";
 import { Ratio } from "../components/Ratio";
 import { Help } from "../components/Tip";
 import { ImageInputPanel, INPUT_ZONE } from "./ImageInputPanel";
-import { useImageInput, type ImageInputStore } from "../store/imageInput";
-import { fitPlan, planFor } from "../lib/inference";
+import { useImageInput, useSentModel, type ImageInputStore } from "../store/imageInput";
 import { effortOf, highModel, withEffort } from "../lib/naiModels";
 import { flashStyle, useFlash, useUi } from "../store/ui";
 import { useDrag } from "../cards/dragStore";
@@ -79,11 +78,12 @@ export function OptionsPanel({ only, host, refs }: {
   /** ★★**이 모델에서 되는 것만 보여 준다** (사용자 지시 2026-08-21).
    *
    *  V5 는 스케줄러·Variety+ 가 아예 없다 — 서버가 무시하는 컨트롤을 남겨 두면 사용자는
-   *  켰다고 믿고 결과만 다르게 나온다. 능력표는 `lib/naiModels.ts` 하나다. */
-  const cap = modelCaps(p.model);
-  /** 인퍼런스가 실리면 그 참조의 크기. 해상도 목록이 결과 크기로 바뀐다 (설계 문서 3번 「해상도」) */
-  const inferSize = useImageInput((s) => s.riding().infer?.size ?? null);
-  /** 씬·큰 그림을 끌고 있다. 이미지 입력의 베이스·Inference 칸이 받는다 (`ImageInputPanel` 의 `DropSlot`) */
+   *  켰다고 믿고 결과만 다르게 나온다. 능력표는 `lib/naiModels.ts` 하나다.
+   *  ★★**실제로 나가는 모델**로 본다 — Precise Reference 가 실리면 Medium 은 High 로 나간다 (`useSentModel`).
+   *    그동안은 High 의 칸(스텝·샘플러·CFG Rescale)이 다시 보이고 Effort 는 High 에 선다 (공홈과 같다). */
+  const sent = useSentModel(p.model, refs ?? useImageInput);
+  const cap = modelCaps(sent);
+  /** 씬·큰 그림을 끌고 있다. 이미지 입력의 베이스 칸이 받는다 (`ImageInputPanel` 의 `DropSlot`) */
   const dragImg = useDrag((s) => s.drag?.dir === "image") && !only;
   useInputPeek(dragImg);
 
@@ -117,14 +117,20 @@ export function OptionsPanel({ only, host, refs }: {
                   Medium 은 별도 모델 id 다 (`withEffort`). 고정되는 칸(스텝·샘플러·CFG Rescale)은 아래에서 숨는다 */}
               {effortOf(p.model) && (
                 <Group label={t("options.effort")} help={t("options.effortHint")}>
-                  <div data-effort={effortOf(p.model)} style={{ display: "flex", border: "1px solid var(--line)", borderRadius: "var(--r-2)", overflow: "hidden", alignSelf: "flex-start" }}>
+                  <div data-effort={effortOf(sent)} style={{ display: "flex", border: "1px solid var(--line)", borderRadius: "var(--r-2)", overflow: "hidden", alignSelf: "flex-start" }}>
                     {(["medium", "high"] as const).map((e, i) => {
-                      const on = effortOf(p.model) === e;
+                      const on = effortOf(sent) === e;
+                      // ★레퍼런스가 실리는 동안 Medium 은 못 고른다 (공홈 `effortForcedByPreciseReference`). 고른 값은 그대로 두어
+                      //   레퍼런스를 빼면 Medium 으로 돌아간다. ★`disabled` 를 쓰지 않는다 — 툴팁이 뜨려면 커서를 받아야 한다
+                      const locked = e === "medium" && sent !== p.model;
                       return (
                         <button
                           key={e}
                           data-effort-pick={e}
-                          onClick={() => !on && set("model", withEffort(p.model, e))}
+                          data-effort-locked={locked ? "" : undefined}
+                          aria-disabled={locked || undefined}
+                          data-tip={locked ? t("options.effortRefs") : undefined}
+                          onClick={() => !on && !locked && set("model", withEffort(p.model, e))}
                           style={{
                             padding: "var(--sp-1) var(--sp-4)",
                             fontSize: "var(--text-xs)",
@@ -132,7 +138,8 @@ export function OptionsPanel({ only, host, refs }: {
                             borderLeft: i ? "1px solid var(--line)" : "none",
                             background: on ? "var(--accent)" : "transparent",
                             color: on ? "var(--accent-on)" : "var(--ink-soft)",
-                            cursor: on ? "default" : "pointer",
+                            opacity: locked ? 0.45 : 1,
+                            cursor: on || locked ? "default" : "pointer",
                           }}
                         >
                           {t(e === "medium" ? "options.effortMedium" : "options.effortHigh")}
@@ -221,17 +228,14 @@ export function OptionsPanel({ only, host, refs }: {
             훑을 수가 없어서 **가로·세로·정방 탭**으로 가르고, 줄마다 그 비율의 사각형을
             함께 그린다 — 숫자보다 모양이 먼저 읽힌다. */}
         <div style={{ display: "flex", flexDirection: "column", gap: "var(--sp-2)" }}>
-          <SizePicker w={p.width} h={p.height} infer={inferSize} onPick={(w, h) => { set("width", w); set("height", h); }} />
+          <SizePicker w={p.width} h={p.height} onPick={(w, h) => { set("width", w); set("height", h); }} />
           {/* ★직접 입력 — NAI 는 64 배수만 받는다. 입력을 떠날 때 올려 맞추고 그 값을 보여 준다
-              (서버도 같은 정렬을 하지만, 무엇이 갈지 지금 보여야 한다)
-              ★인퍼런스일 때는 없다. 결과 크기는 목록에서 고른다 (사용자 결정 2026-09-29) */}
-          {!inferSize && (
+              (서버도 같은 정렬을 하지만, 무엇이 갈지 지금 보여야 한다) */}
           <div style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)" }}>
             <NumBox data-size="w" value={p.width} onCommit={(v) => setUndo("width", alignTo64(v), t("options.resolution"))} />
             <span style={{ color: "var(--ink-faint)", fontSize: "var(--text-2xs)" }}>×</span>
             <NumBox data-size="h" value={p.height} onCommit={(v) => setUndo("height", alignTo64(v), t("options.resolution"))} />
           </div>
-          )}
         </div>
       </Category>
 
@@ -288,23 +292,12 @@ export function OptionsPanel({ only, host, refs }: {
  *    한눈에 안 들어온다. 목록의 사각형과 **같은 방식**으로 그린다 (긴 변을 맞춘다).
  *  ★묶음(Small·Large·Wallpaper)은 지우지 않고 **줄 오른쪽에 이름으로** 남긴다 — 가르는
  *    축은 방향 하나뿐이어야 훑을 수 있다. */
-function SizePicker({ w, h, infer, onPick }: {
-  w: number;
-  h: number;
-  /** ★★인퍼런스 참조의 크기. 있으면 줄마다 **그 프리셋으로 나오는 결과 크기**를 보인다 (사용자 결정 2026-09-29:
-   *  넣은 참조로 제대로 뽑히는 크기를 보여 주고 그중 고르게). 고르는 값은 그대로 프리셋이다 (`lib/inference` 의 `planFor`).
-   *  ★그 참조로 못 쓰는 줄(참조가 너무 작아지는 것)은 안 보인다. 켜진 줄과 탭은 **실제로 쓰는 배치**(`fitPlan`)를 따른다 */
-  infer?: { w: number; h: number } | null;
-  onPick: (w: number, h: number) => void;
-}) {
+function SizePicker({ w, h, onPick }: { w: number; h: number; onPick: (w: number, h: number) => void }) {
   const t = useI18n((s) => s.t);
   const sizeLast = useUi((u) => u.sizeLast);
   const setSizeLast = useUi((u) => u.setSizeLast);
   const dirOf = (a: number, b: number): SizeDir => (a > b ? "landscape" : a === b ? "square" : "portrait");
-  const presets = SIZE_PRESETS.flatMap((g) => g.items.map(([pw, ph]) => [pw, ph] as [number, number]));
-  /** 인퍼런스가 실제로 쓰는 배치. 해상도 칸 값으로 못 쓰면 대신 고른 프리셋의 것이다 */
-  const cur = infer ? fitPlan(infer.w, infer.h, w, h, presets) : null;
-  const tab = cur ? dirOf(cur.pick[0], cur.pick[1]) : dirOf(w, h);
+  const tab = dirOf(w, h);
 
   /** 고르면 그 방향의 마지막 값으로 적어 둔다 — 탭을 오갈 때 이것이 돌아온다 */
   const pick = (pw: number, ph: number) => {
@@ -312,23 +305,8 @@ function SizePicker({ w, h, infer, onPick }: {
     onPick(pw, ph);
   };
 
-  const seen = new Set<string>();
   const shown = SIZE_PRESETS.flatMap((g) => g.items.map((it) => ({ group: g.group, item: it })))
-    .filter((x) => dirOf(x.item[0], x.item[1]) === tab)
-    .map((x) => {
-      const plan = infer ? planFor(infer.w, infer.h, x.item[0], x.item[1]) : null;
-      return { ...x, out: plan ? ([plan.crop.w, plan.crop.h] as const) : null };
-    })
-    // ★인퍼런스면 그 참조로 못 쓰는 줄은 뺀다 (사용자 결정 2026-09-29: 참조가 640 미만이 되는 줄)
-    // ★결과 크기가 같은 줄은 한 번만 보인다. 1MP 아래 프리셋은 예산이 같아 같은 비율이면 같은 결과가 나온다
-    .filter((x) => {
-      if (!infer) return true;
-      if (!x.out) return false;
-      const key = x.out.join("x");
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+    .filter((x) => dirOf(x.item[0], x.item[1]) === tab);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--sp-2)" }}>
@@ -336,14 +314,12 @@ function SizePicker({ w, h, infer, onPick }: {
         {(["landscape", "portrait", "square"] as const).map((d) => {
           const on = tab === d;
           const [lw, lh] = sizeLast[d] ?? DIR_FALLBACK[d];
-          // ★인퍼런스면 그 값으로 못 쓸 때 비율이 가장 가까운 쓸 수 있는 줄을 건다 (목록에 없는 값이 걸리지 않게)
-          const [tw, th] = (infer && fitPlan(infer.w, infer.h, lw, lh, presets)?.pick) || [lw, lh];
           return (
             <button
               key={d}
               data-size-tab={d}
               // ★누르는 순간 그 방향이 걸린다 — 목록은 그 결과로 따라 바뀐다
-              onClick={() => pick(tw, th)}
+              onClick={() => pick(lw, lh)}
               style={{
                 flex: 1,
                 display: "flex",
@@ -365,22 +341,13 @@ function SizePicker({ w, h, infer, onPick }: {
           );
         })}
       </div>
-      {infer && (
-        <span data-infer-sizes style={{ fontSize: "var(--text-2xs)", color: "var(--ink-dim)" }}>
-          {t("options.inferSizes")}
-        </span>
-      )}
       <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-        {shown.map(({ group, item: [pw, ph, star], out }) => {
-          // ★인퍼런스면 **결과 크기가 같은 줄**이 켜진다. 같은 결과로 한 줄에 합친 프리셋을 골라 두었어도 표시가 선다
-          const on = out && cur ? out[0] === cur.crop.w && out[1] === cur.crop.h : w === pw && h === ph;
-          // 보이는 크기 (인퍼런스면 결과 크기, 아니면 프리셋 그대로)
-          const [sw, sh] = out ?? [pw, ph];
+        {shown.map(({ group, item: [pw, ph, star] }) => {
+          const on = w === pw && h === ph;
           return (
             <button
               key={`${pw}x${ph}`}
               data-size-preset={`${pw}x${ph}`}
-              data-size-out={out ? `${sw}x${sh}` : undefined}
               onClick={() => pick(pw, ph)}
               style={{
                 display: "flex",
@@ -396,13 +363,12 @@ function SizePicker({ w, h, infer, onPick }: {
               }}
             >
               <span style={{ width: 28, height: 28, display: "grid", placeItems: "center", flexShrink: 0 }}>
-                <Ratio w={sw} h={sh} max={26} on={on} />
+                <Ratio w={pw} h={ph} max={26} on={on} />
               </span>
               <span style={{ flex: 1, fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums" }}>
-                {sw}×{sh}
+                {pw}×{ph}
               </span>
-              {/* ★「기본 요금」 표시는 프리셋 크기에 대한 것이다. 인퍼런스는 캔버스 크기로 세므로 안 붙인다 */}
-              {star && !out && (
+              {star && (
                 <span data-tip={t("options.starHint")} style={{ display: "inline-grid", color: "var(--ink-faint)" }}>
                   {Icon.spark12}
                 </span>

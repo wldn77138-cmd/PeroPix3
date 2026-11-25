@@ -244,6 +244,12 @@ VARIETY_SIGMA_BASE_V4 = 19
 _V45 = {
     "vibe": True,            # Vibe Transfer
     "char_ref": True,        # Precise Reference (director_reference_*)
+    #: ★Precise Reference 항목들 (공홈 번들 `b2fe159` 2026-11-25 대조. V5 에 레퍼런스가 생기며 능력이 갈렸다)
+    "char_ref_inpaint": True,       # 인페인트에도 실리나 (`charRefInpainting`)
+    "char_ref_bucket": False,       # 1MP 판에 덮어 맞추고 가운데를 잘라 보내나 (`bucketCharacterReferences`). 거짓이면 세 판에 레터박스 (`resizeCharacterReferences`)
+    "char_ref_fidelity": True,      # Fidelity 를 받나 (`characterReferenceFidelity`). 거짓이면 1 로 나간다
+    "char_ref_strength_max": 1,     # Strength 슬라이더 끝 (`characterReferenceStrengthMax`)
+    "outfit_refs": False,           # Outfit 레퍼런스·「Prefer same outfit」 (`outfitReferences`)
     "noise_schedule": True,  # 스케줄러를 고를 수 있나
     "cfg_rescale": True,
     "cfg_delay": True,       # Variety+ (skip_cfg_above_sigma)
@@ -260,8 +266,13 @@ _V45 = {
 _V5 = {
     **_V45,
     # ★★V5 에서 **꺼진 것들**. 공홈 FAQ: 바이브·정밀 참조는 "post-launch additions".
+    #   ★정밀 참조는 2026-11 에 들어왔다 (번들 `b2fe159`). 바이브는 아직 없다.
     "vibe": False,
-    "char_ref": False,
+    "char_ref_inpaint": False,
+    "char_ref_bucket": True,
+    "char_ref_fidelity": False,
+    "char_ref_strength_max": 5,
+    "outfit_refs": True,
     "noise_schedule": False,  # 전송 구간이 karras 로 덮어쓴다
     "cfg_delay": False,       # Variety+ 자체가 없다
     "transparency": True,
@@ -271,19 +282,24 @@ _V5 = {
     "anlas_multiplier": 1.5,  # ★★같은 해상도·스텝에서 V4.5 의 1.5배
 }
 for _c in (_V45, _V5):
-    _c.setdefault("anlas_step_factor", 1.0)
+    _c.setdefault("anlas_formula", None)
     _c.setdefault("fixed", None)
 #: ★★V5 Full **Medium** (공홈 「Effort: Medium」, 번들 `b0f9d00` 2026-10-12 대조).
 #:   V5 Full 과 같고 CFG Rescale 만 없다. 그리고 **설정 몇 개가 고정**이다 (`fixedSettings`):
 #:   공홈은 보내기 직전에 스텝·샘플러·UC 프리셋을 덮고, **사용자 UC 와 캐릭터 UC 를 비운다**
 #:   (`uc: s3(model, "heavy", prompt, "")` · `characterPrompts[].uc = ""`). `build_payload` 가 같은 일을 한다.
-#:   요금은 V5 식의 스텝 항에만 `1/1.06521739` 가 곱해진다 (`anlas_step_factor`).
+#:   요금은 식이 따로다: `(C_BASE·px + C_STEP·px·23) / 1.75` 를 올림 없이 (`anlas_formula`, 번들 `b2fe159` 2026-11-25).
+#:   ★서버는 생성 요금을 세지 않는다. 화면 표(`src/lib/naiModels.ts`)와 맞추려고 둔다.
 _V5_MEDIUM = {
     **_V5,
     "cfg_rescale": False,
-    "anlas_step_factor": 1 / 1.06521739,
+    "anlas_formula": {"steps": 23, "divisor": 1.75},
     "fixed": {"steps": 14, "sampler": "k_euler_ancestral", "uc_preset_id": "heavy"},
 }
+#: ★★Effort 짝 — **Medium → High** (공홈 `G()`). Precise Reference 가 실리면 High 로 나간다
+#:   (공홈 `effortForcedByPreciseReference`: 「Precise Reference needs High effort」). `build_payload` 가 바꾼다.
+#:   ★화면 쪽 짝은 `src/lib/naiModels.ts` 의 `MEDIUM_OF` 다 (`test_caps_parity.py` 가 대조한다)
+EFFORT_HIGH = {"nai-diffusion-5-full-medium": "nai-diffusion-5-full"}
 MODEL_CAPS: dict[str, dict] = {
     "nai-diffusion-5-full": _V5,
     "nai-diffusion-5-full-medium": _V5_MEDIUM,
@@ -568,8 +584,58 @@ class GenRequest:
     base_mask: str = ""
 
 
+def _masked(req: GenRequest) -> bool:
+    """마스크를 실어 보내는가 (= 인페인트). 아래 i2i·인페인트 갈래와 **같은 조건**이다."""
+    return bool(req.base_image) and req.base_mode == "inpaint" and bool(req.base_mask)
+
+
+def ref_model(req: GenRequest, model: str | None = None) -> str:
+    """레퍼런스 규칙을 볼 모델 — 인페인트면 **실제로 그리는 인페인트 모델**이다.
+
+    ★공홈은 인페인트 요청을 인페인트 모델 이름으로 조립하므로 그 모델의 능력으로 거르고 다듬는다.
+      그래서 V5 Curated 인페인트(→ V4.5 Curated 인페인트)는 V4.5 규칙으로 레퍼런스가 **실린다**
+      (사용자 결정 2026-11-25: 공홈 화면은 「무시된다」고 하지만 요청은 싣는다. 요청을 따른다)."""
+    m = model or req.model
+    if _masked(req) and not m.endswith("-inpainting"):
+        m = INPAINT_MODEL.get(m, INPAINT_MODEL_DEFAULT)
+    return m
+
+
+def riding_refs(req: GenRequest, model: str | None = None) -> list[dict]:
+    """★★실제로 실리는 Precise Reference — 공홈 전송 구간의 거르기 둘을 그대로 옮겼다.
+
+    · 그 모델이 받을 때만, 인페인트면 `charRefInpainting` 일 때만
+      (`x.length>0 && J.characterReferences && (!t.mask || J.charRefInpainting)`).
+    · Outfit 을 못 받는 모델은 `costume` 을 빼고, 의상 갈래를 기본 갈래로 되돌린다.
+      Fidelity 를 못 받는 모델은 1 로 보낸다 (공홈 `c()`).
+    ★능력은 `ref_model` 의 것이다 (인페인트면 인페인트 모델).
+    ★화면도 같은 판정을 한다 (`store/imageInput` 의 `riding`). 요금이 그쪽을 센다."""
+    cap = caps(ref_model(req, model))
+    if not cap["char_ref"] or (_masked(req) and not cap["char_ref_inpaint"]):
+        return []
+    out = []
+    for r in req.precise_references:
+        if not r.get("image"):
+            continue
+        mode = r.get("mode", "character&style")
+        if not cap["outfit_refs"]:
+            if mode == "costume":
+                continue
+            mode = {"character_mainoutfit": "character",
+                    "character&style_anyoutfit": "character&style"}.get(mode, mode)
+        out.append({**r, "mode": mode,
+                    "fidelity": r.get("fidelity", 1.0) if cap["char_ref_fidelity"] else 1.0})
+    return out
+
+
 def build_payload(req: GenRequest) -> dict:
     """NAI 요청 페이로드를 조립한다. 실제 생성 여부와 무관하게 단위 검증이 가능하도록 분리."""
+    # ★★Precise Reference 가 실리면 **High 로 나간다** (`EFFORT_HIGH` 의 ★★주). 공홈은 실제로 보내는
+    #   모델을 이렇게 고른다: `G(model) && refsActive(G(model)) ? G(model) : model`.
+    #   ★고정 설정(아래)보다 먼저여야 한다. High 는 사용자의 스텝·샘플러·UC 를 그대로 쓴다.
+    high = EFFORT_HIGH.get(req.model)
+    if high and riding_refs(req, high):
+        req = dataclasses.replace(req, model=high)
     cap = caps(req.model)
     # ★★고정 설정 모델(V5 Full Medium)은 **공홈처럼 보내기 직전에 덮는다** (`_V5_MEDIUM` 의 ★★주).
     #   사용자가 적은 UC·캐릭터 UC 는 나가지 않고 프리셋 본문만 나간다. 받은 요청은 고치지 않는다(사본).
@@ -788,13 +854,20 @@ def build_payload(req: GenRequest) -> dict:
             params["reference_information_extracted_multiple"] = infos
         params["reference_strength_multiple"] = strengths
 
-    # ── Precise Reference (V4.5, v2 backend.py:1544-1593) ──
+    # ── Precise Reference (V4.5, v2 backend.py:1544-1593 · V5 는 번들 `b2fe159`) ──
     #   ★전부 웹 캡처로 맞춘 값이다: secondary = 1 - fidelity 반전 · round(...,2) ·
     #     information_extracted 는 **항상 1** · mode 를 `base_caption` 에 넣는 구조.
-    #   ★★그 모델이 지원할 때만 싣는다 (`PE().characterReferences`). V5 는 **거짓**이다.
-    refs = [r for r in req.precise_references if r.get("image")] if cap["char_ref"] else []
+    #   ★★거르는 것은 `riding_refs` 하나다 (모델 능력 · 인페인트 · Outfit · Fidelity).
+    refs = riding_refs(req)
     if refs:
-        params["director_reference_images"] = [r["image"] for r in refs]
+        # ★그림은 **원본**으로 온다. 다듬는 것은 여기 한 곳이다 (공홈 전송 구간과 같은 자리):
+        #   판에 맞추는 모델(V5)은 1MP 판에 덮어 맞추고, 아니면(V4.5) 세 판에 레터박스로 얹는다.
+        rcap = caps(ref_model(req))
+        params["director_reference_images"] = [
+            imgutil.bucket_reference(r["image"]) if rcap["char_ref_bucket"]
+            else imgutil.letterbox_reference(r["image"], transparent=rcap["transparency"])
+            for r in refs
+        ]
         params["director_reference_information_extracted"] = [1 for _ in refs]
         params["director_reference_strength_values"] = [r.get("strength", 1.0) for r in refs]
         params["director_reference_secondary_strength_values"] = [
@@ -873,7 +946,7 @@ def build_payload(req: GenRequest) -> dict:
             params["deliberate_euler_ancestral_bug"] = False
             params["prefer_brownian"] = True
 
-            # ★인페인트는 vibe 를 지원하지 않는다 (Precise Reference 는 지원한다)
+            # ★인페인트는 vibe 를 지원하지 않는다 (Precise Reference 는 그 모델이 받을 때만 — `riding_refs`)
             for k in (
                 "reference_image_multiple",
                 "reference_information_extracted_multiple",

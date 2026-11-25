@@ -24,7 +24,7 @@ import { useUi } from "../store/ui";
 import { useGen } from "../store/gen";
 import { useLlm } from "../store/llm";
 import { usePrompt } from "../store/prompt";
-import { MAX_VIBES, useImageInput } from "../store/imageInput";
+import { MAX_VIBES, useImageInput, type RefMode } from "../store/imageInput";
 import { costNow, countNow } from "./costNow.ts";
 import { cardLocked } from "./sceneCards.ts";
 import { t } from "../i18n";
@@ -1262,14 +1262,6 @@ function imageInputs() {
     refOn: s.refOn,
     references: s.refs.map((r, i) => ({ index: i + 1, name: r.name, on: r.on !== false,
                                         mode: r.mode, strength: r.strength, fidelity: r.fidelity })),
-    // ★인퍼런스 (V5 Full 전용). 실리는 동안에는 베이스 그림이 안 나간다 (`riding`)
-    inference: s.infer
-      ? (() => {
-          const plan = s.inferPlan();
-          return { name: s.infer.name, on: s.inferOn, riding: !!s.riding().infer,
-                   result: plan ? `${plan.crop.w}x${plan.crop.h}` : null };
-        })()
-      : null,
   };
 }
 
@@ -1393,23 +1385,24 @@ defineAction({
     + "★넣으면 레퍼런스 묶음이 켜진다 (바이브와는 동시에 못 쓴다 — NAI 제약).",
   args: {
     image: { type: "string", desc: "어느 그림 — `set_base_image` 와 같은 꼴", required: true },
-    mode: { type: "string", desc: '"character&style"(기본) · "character" · "style"' },
-    strength: { type: "number", desc: "Reference Strength (기본 1)" },
-    fidelity: { type: "number", desc: "Fidelity 0~1 (기본 1)" },
+    mode: {
+      type: "string",
+      desc: '"character&style"(기본) · "character" · "style". V5 는 더 있다: "costume"(의상만) · '
+        + '"character&style_anyoutfit"(의상은 따르지 않음) · "character_mainoutfit"(의상까지 따름)',
+    },
+    strength: { type: "number", desc: "Reference Strength (기본 1. V4.5 는 1 까지, V5 는 5 까지가 보통이다)" },
+    fidelity: { type: "number", desc: "Fidelity 0~1 (기본 1). V5 는 받지 않는다" },
   },
   confirm: "none",
   run: async (a) => {
     const { findImage } = await import("./findImage.ts");
     const got = await findImage(String(a.image ?? ""));
     if ("error" in got) return got;
-    const { processReference } = await import("../store/imageInput");
-    const mode = ["character&style", "character", "style"].includes(String(a.mode ?? ""))
-      ? (String(a.mode) as "character&style" | "character" | "style")
-      : "character&style";
+    const modes: RefMode[] = ["character&style", "character&style_anyoutfit", "character", "character_mainoutfit", "style", "costume"];
+    const mode = modes.includes(String(a.mode ?? "") as RefMode) ? (String(a.mode) as RefMode) : "character&style";
     const s = useImageInput.getState();
     s.addRef({
-      image: await processReference(got.data),
-      preview: got.data,
+      image: got.data,
       name: got.name,
       mode,
       strength: typeof a.strength === "number" ? a.strength : 1,
@@ -1480,61 +1473,16 @@ defineAction({
 });
 
 defineAction({
-  id: "set_inference",
-  title: "인퍼런스 참조를 겁니다",
-  desc: "★**인퍼런스 참조 그림을 건다** (V5 Full 전용). 참조를 캔버스 한쪽에 붙이고 나머지를 인페인트해 같은 캐릭터를 그린다. "
-    + "«이 캐릭터로»·«이 캐릭터 일관성 유지» 가 이것이다. "
-    + "★`image` 를 가리키는 법은 `set_base_image` 와 같다. "
-    + "★건 동안에는 **베이스 그림이 안 나간다.** 결과 크기는 해상도 칸의 값으로 정해지고, 답의 `inputs.inference.result` 가 그 크기다. "
-    + "★캐릭터 외형 태그는 앱이 넣지 않는다. 프롬프트에 그 캐릭터의 외형 태그가 있어야 잘 맞는다. "
-    + "★★이것만으로는 그림이 안 나온다. 실제 생성은 `generate` 다.",
-  args: {
-    image: { type: "string", desc: "어느 그림 — `set_base_image` 와 같은 꼴", required: true },
-  },
-  confirm: "none",
-  run: async (a) => {
-    const { findImage } = await import("./findImage.ts");
-    const got = await findImage(String(a.image ?? ""));
-    if ("error" in got) return got;
-    const { INFERENCE_MODEL } = await import("./inference.ts");
-    if (useGen.getState().params.model !== INFERENCE_MODEL)
-      return err("blocked", "인퍼런스는 V5 Full 에서만 씁니다. 모델을 바꾼 뒤에 다시 거십시오.", { retry: "never" });
-    const s = useImageInput.getState();
-    s.setInfer(got.data, got.name);
-    return {
-      ok: true, did: `인퍼런스 참조에 「${got.name}」 을 검`,
-      at: { kind: "imageInput", what: "inference" }, image: got.from, inputs: imageInputs(),
-    };
-  },
-});
-
-defineAction({
-  id: "clear_inference",
-  title: "인퍼런스 참조를 뺍니다",
-  desc: "★**걸어 둔 인퍼런스 참조를 뺀다.** 빼면 베이스 그림이 걸려 있을 때 그것이 다시 실린다.",
-  args: {},
-  confirm: "none",
-  run: async () => {
-    const s = useImageInput.getState();
-    if (!s.infer) return { ok: true, did: "걸린 인퍼런스 참조가 없었음", inputs: imageInputs() };
-    const name = s.infer.name;
-    s.clearInfer();
-    return { ok: true, did: `인퍼런스 참조 「${name}」 을 뺌`, at: { kind: "imageInput", what: "inference" },
-             inputs: imageInputs() };
-  },
-});
-
-defineAction({
   id: "list_image_inputs",
   title: "걸려 있는 그림 입력을 봅니다",
-  desc: "★**지금 탭에 걸려 있는 베이스 그림·바이브·정밀 레퍼런스·인퍼런스**를 목록으로 준다. "
+  desc: "★**지금 탭에 걸려 있는 베이스 그림·바이브·정밀 레퍼런스**를 목록으로 준다. "
     + "빼거나 켜고 끄기 전에 이것으로 번호를 확인한다. "
     + "★이미지 입력은 **탭마다 따로**다 — 여기 나오는 것은 지금 보고 있는 탭 것이다.",
   args: {},
   confirm: "none",
   run: async () => {
     const v = imageInputs();
-    const n = (v.base ? 1 : 0) + v.vibes.length + v.references.length + (v.inference ? 1 : 0);
+    const n = (v.base ? 1 : 0) + v.vibes.length + v.references.length;
     return { ok: true, did: n ? `걸려 있는 그림 입력 ${n}개` : "걸려 있는 그림 입력이 없음", inputs: v };
   },
 });

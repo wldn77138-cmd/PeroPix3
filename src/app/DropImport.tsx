@@ -6,8 +6,7 @@ import { useImageDrop, type Dropped } from "../lib/dropImages";
 import { DROP_ACCEPT, readDrop, vibeFromCachePng, type DropRead } from "../lib/dropImport";
 import { hasMeta } from "../lib/metaApply";
 import { isNaiVibeFile } from "../lib/naiVibeFile";
-import { MAX_VIBES, processReference, pushVibe, useImageInput } from "../store/imageInput";
-import { INFERENCE_MODEL } from "../lib/inference";
+import { MAX_VIBES, pushVibe, useImageInput } from "../store/imageInput";
 import { vibeDefaults } from "../lib/vibeDefaults";
 import { fitSizeToBase, modelCaps, useGen } from "../store/gen";
 import { useUi } from "../store/ui";
@@ -212,23 +211,14 @@ function Sheet({
     leave();
   };
 
-  /** 인퍼런스 참조로 (V5 Full 에서만 낸다, 설계 `docs/inference-design.md`) */
-  const asInfer = () => {
-    if (!m?.data) return;
-    useImageInput.getState().setInfer(m.data, name);
-    useUi.getState().reveal("left", "base", false);
-    leave();
-  };
-
   const asRef = async () => {
     if (!m?.data || busy) return;
     setBusy(true);
     try {
       useImageInput.getState().setRefOn(true);
       useImageInput.getState().addRef({
-        // ★보내는 것은 **다듬은 판**, 보여 주는 것은 원본이다 (`processReference` 의 ★주)
-        image: await processReference(m.data),
-        preview: m.data,
+        // ★원본 그대로 넣는다. 모델에 맞게 다듬는 것은 서버다 (`PreciseRef.image`)
+        image: m.data,
         name,
         mode: "character&style",
         strength: 1,
@@ -394,7 +384,7 @@ function Sheet({
               {t("imgIn.base")}
             </button>
           )}
-          {/* ★모델이 못 하는 것은 안 낸다 — V5 에는 Vibe 도 Precise Reference 도 없다 */}
+          {/* ★모델이 못 하는 것은 안 낸다 — V5 에는 Vibe 가 없다 */}
           {cap.vibe && (vibeFile || !!m?.data) && (
             <button data-drop-vibe disabled={busy} onClick={asVibe} style={btn}>
               {t("imgIn.vibeAdd")}
@@ -403,11 +393,6 @@ function Sheet({
           {cap.char_ref && !vibeFile && !!m?.data && (
             <button data-drop-ref disabled={busy} onClick={() => void asRef()} style={btn}>
               {t("imgIn.ref")}
-            </button>
-          )}
-          {model === INFERENCE_MODEL && !vibeFile && !!m?.data && (
-            <button data-drop-infer disabled={busy} onClick={asInfer} style={btn}>
-              {t("imgIn.inference")}
             </button>
           )}
           {/* ★★**갤러리에 그대로 넣는다** (사용자 지시 2026-08-25: *"현재는 설정 적용 후 한 번
